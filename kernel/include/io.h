@@ -18,6 +18,18 @@ static inline u32 mmio_read32(uintptr_t addr)
     return *(volatile u32 *)addr;
 }
 
+/* 64-битный доступ нужен GICv3: GICR_TYPER и GICD_IROUTER — одно 64-битное поле,
+ * читать их двумя 32-битными обращениями спецификация не разрешает. */
+static inline void mmio_write64(uintptr_t addr, u64 val)
+{
+    *(volatile u64 *)addr = val;
+}
+
+static inline u64 mmio_read64(uintptr_t addr)
+{
+    return *(volatile u64 *)addr;
+}
+
 /* Data Synchronization Barrier — дождаться реального завершения записи */
 static inline void dsb(void)      { __asm__ volatile("dsb sy" ::: "memory"); }
 static inline void isb(void)      { __asm__ volatile("isb" ::: "memory"); }
@@ -47,5 +59,20 @@ static inline u64 read_cntfrq(void)
 {
     u64 v; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v)); return v;
 }
+
+/* Виртуальный счётчик. В отличие от CNTPCT_EL0 доступен из EL1 всегда,
+ * без разрешения со стороны EL2 — на телефоне это важно. */
+static inline u64 read_cntvct(void)
+{
+    u64 v; __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v)); return v;
+}
+
+/*
+ * Системные регистры GICv3 (ICC_*) и прочие, чьи имена старый ассемблер
+ * может не знать. Пишем их «сырой» кодировкой S<op0>_<op1>_C<crn>_C<crm>_<op2> —
+ * такая форма собирается всегда и заодно документирует саму кодировку.
+ */
+#define SYSREG_READ(reg) ({ u64 __v; __asm__ volatile("mrs %0, " reg : "=r"(__v)); __v; })
+#define SYSREG_WRITE(reg, val)     __asm__ volatile("msr " reg ", %0" :: "r"((u64)(val)) : "memory")
 
 #endif

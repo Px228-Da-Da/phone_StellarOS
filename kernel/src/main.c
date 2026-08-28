@@ -10,9 +10,19 @@
 #include "print.h"
 #include "fb.h"
 #include "mmu.h"
+#include "gic.h"
+#include "timer.h"
 
 #define OS_NAME     "VELO-OS"
-#define OS_VERSION  "0.1"
+#define OS_VERSION  "0.2"
+
+/* Частота системного тика. 100 Гц — компромисс: достаточно часто, чтобы
+ * планировщик на этапе 4 переключал задачи незаметно для глаза, и достаточно
+ * редко, чтобы обработчик прерывания не съедал время сам на себя. */
+#define TIMER_HZ    100
+
+static void heartbeat(void);
+static int  irq_works(void);
 
 /* Заголовок DTB: big-endian, магия 0xd00dfeed */
 struct fdt_header {
@@ -170,14 +180,74 @@ void kmain(u64 dtb_phys)
 
     test_pattern();
 
+    /* Прерывания. Порядок жёсткий: сперва контроллер, потом таймер
+     * (он прописывает себя в контроллер), и только в самом конце снимаем
+     * маску DAIF.I. Снять её раньше — поймать прерывание без обработчика. */
+    if (gic_init() == 0 && timer_init(TIMER_HZ) == 0) {
+        irq_enable();
+        kprintf("IRQ      : РАЗРЕШЕНЫ\n");
+    } else {
+        kprintf("IRQ      : НЕДОСТУПНЫ, ОСТАЁМСЯ НА ОПРОСЕ СЧЁТЧИКА\n");
+    }
+
     kprintf("\nBOOT OK. HEARTBEAT:\n");
 
-    /* Пульс: показывает, что ядро живо, а не замерло на красивой картинке */
-    for (u32 tick = 0; ; tick++) {
-        kprintf("TICK %u\n", tick);
+    heartbeat();
+}
+
+/*
+ * Дошло ли до нас хоть одно прерывание таймера.
+ *
+ * Проверять это ОБЯЗАТЕЛЬНО активным ожиданием, а не через wfi: если
+ * прерывания не доходят, будить процессор из wfi будет нечему, и он
+ * останется там навсегда. На телефоне это выглядело бы как чёрный экран
+ * без единого слова о причине — ровно то, чего мы избегаем.
+ */
+static int irq_works(void)
+{
+    u64 deadline = read_cntvct() + read_cntfrq() / 4;   /* даём 250 мс */
+
+    while (read_cntvct() < deadline)
+        if (timer_ticks() > 0)
+            return 1;
+
+    return 0;
+}
+
+/*
+ * Пульс ядра. Раньше это был цикл активного ожидания; теперь процессор стоит
+ * в wfi и просыпается только по прерыванию таймера. Заодно это и проверка
+ * всей цепочки: таймер -> GIC -> вектор -> обработчик -> EOI.
+ */
+static void heartbeat(void)
+{
+    u64 last_sec = 0;
+    int irq_alive = irq_works();
+    u32 beat = 0;
+
+    if (!irq_alive)
+        kprintf("IRQ      : ТИКОВ НЕТ, ПЕРЕХОЖУ НА ОПРОС СЧЁТЧИКА\n");
+
+    for (;;) {
+        u64 sec;
+
+        if (irq_alive) {
+            wfi();
+            sec = timer_ticks() / TIMER_HZ;
+            if (sec == last_sec)
+                continue;               /* проснулись раньше следующей секунды */
+        } else {
+            delay_ms(1000);
+            sec = last_sec + 1;
+        }
+
+        last_sec = sec;
+        beat++;
+        kprintf("TICK %lu  IRQ %lu  UPTIME %lu МС\n",
+                sec, gic_count(), timer_uptime_ms());
+
         if (fb_available())
-            fb_fill_rect(0, 0, 40, 40, (tick & 1) ? COLOR_GREEN : COLOR_BLACK);
-        delay_ms(1000);
+            fb_fill_rect(0, 0, 40, 40, (beat & 1) ? COLOR_GREEN : COLOR_BLACK);
     }
 }
 
@@ -205,5 +275,5 @@ void exception_fatal(u64 type, u64 esr, u64 elr, u64 far)
 
 void irq_handler(void)
 {
-    /* Появится вместе с драйвером GIC (этап 3) */
+    gic_dispatch();
 }

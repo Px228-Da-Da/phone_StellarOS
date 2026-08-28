@@ -31,6 +31,11 @@
  * ICC_* (msr/mrs), а не через MMIO CPU-интерфейс как GICv2.
  * gic_cpu@0c400000 — блок GIC CPU wakeup, не путать с GICC из v2. */
 #define MT_GICD_BASE        0x0C000000UL    /* distributor             */
+/* TODO-VERIFY: имя узла даёт только базу дистрибьютора. Адрес редистрибьюторов
+ * взят по раскладке GIC-500 в ядрах MediaTek mt6765/mt6768 (dist 0x0c000000
+ * размером 256 КБ, redist 0x0c100000 размером 2 МБ). Сверить по merlin.dts
+ * сразу после разблокировки — это единственное здесь непроверенное число. */
+#define MT_GICR_BASE        0x0C100000UL    /* redistributors, шаг 128 КБ */
 #define MT_GIC_CPU_BASE     0x0C400000UL
 #define MT_GIC_IS_V3        1
 
@@ -65,6 +70,9 @@
 #define MERLIN_FB_HEIGHT    2340
 #define MERLIN_FB_BPP       32
 
+/* PPI таймеров. Используем виртуальный: физический из EL1 доступен только
+ * с разрешения EL2, а EL2 здесь чужой. Подробности в include/timer.h. */
+#define MT_ARCH_TIMER_VIRT  27
 #define MT_ARCH_TIMER_IRQ   30              /* non-secure physical timer PPI */
 
 #endif

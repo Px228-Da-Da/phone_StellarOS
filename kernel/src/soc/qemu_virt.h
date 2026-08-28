@@ -6,9 +6,15 @@
  */
 
 #define QEMU_UART0_BASE     0x09000000UL    /* PL011                     */
-#define QEMU_GICD_BASE      0x08000000UL
-#define QEMU_GICC_BASE      0x08010000UL
-#define QEMU_ARCH_TIMER_IRQ 30
+
+/* Контроллер прерываний.
+ * ВАЖНО: запускать QEMU нужно с -M virt,gic-version=3 (см. Makefile).
+ * По умолчанию virt даёт GICv2, а в merlin стоит GIC-500, то есть v3.
+ * Держим в эмуляторе ту же версию, что и на телефоне: иначе отлаживали бы
+ * код, который на железо всё равно не поедет. */
+#define QEMU_GICD_BASE      0x08000000UL    /* distributor               */
+#define QEMU_GICR_BASE      0x080A0000UL    /* redistributors, шаг 128 КБ */
+#define QEMU_GICC_BASE      0x08010000UL    /* CPU-интерфейс GICv2, не нужен */
 
 /* PL011 */
 #define PL011_DR            0x00

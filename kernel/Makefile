@@ -65,15 +65,19 @@ $(BUILD)/Image: $(BUILD)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
 	@echo "Готово: $@ ($$(stat -c%s $@) байт)"
 
+# gic-version=3 обязателен: в merlin стоит GIC-500 (v3), и мы хотим отлаживать
+# в эмуляторе ровно тот код, который поедет на телефон.
+QEMU := qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a53 -m 1G -nographic
+
 run: BOARD := qemu
 run: $(BUILD)/Image
-	qemu-system-aarch64 -M virt -cpu cortex-a53 -m 1G -nographic \
+	$(QEMU) \
 	    -kernel $(BUILD)/Image
 
 debug: BOARD := qemu
 debug: $(BUILD)/Image
 	@echo "Ожидаю gdb на localhost:1234 ..."
-	qemu-system-aarch64 -M virt -cpu cortex-a53 -m 1G -nographic \
+	$(QEMU) \
 	    -kernel $(BUILD)/Image -S -s
 
 clean:
