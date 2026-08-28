@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "print.h"
 #include "fb.h"
+#include "mmu.h"
 
 #define OS_NAME     "VELO-OS"
 #define OS_VERSION  "0.1"
@@ -37,6 +38,30 @@ static void delay_ms(u32 ms)
 
     while (read_cntpct() < target)
         ;
+}
+
+
+/*
+ * Замер скорости записи в память. Гоняем один и тот же цикл до и после
+ * включения кэшей — разница показывает, что MMU реально заработал.
+ */
+static u32 bench_buf[16 * 1024];            /* 64 КБ */
+
+static u64 bench_memfill(void)
+{
+    u64 t0 = read_cntpct();
+
+    for (u32 pass = 0; pass < 64; pass++)
+        for (u32 i = 0; i < ARRAY_SIZE(bench_buf); i++)
+            bench_buf[i] = i + pass;
+
+    return read_cntpct() - t0;
+}
+
+/* Перевод тиков счётчика в микросекунды */
+static u64 ticks_to_us(u64 ticks)
+{
+    return (ticks * 1000000UL) / read_cntfrq();
 }
 
 static void banner(void)
@@ -107,17 +132,42 @@ static void test_pattern(void)
 
 void kmain(u64 dtb_phys)
 {
+    u64 slow, fast;
+
     uart_init();
+    banner();
+
+    /* Замеряем «как было»: MMU выключен, вся память Device, кэшей нет */
+    slow = bench_memfill();
+
+    kprintf("MMU      : ВКЛЮЧАЮ...\n");
+    mmu_enable();
+    kprintf("MMU      : ВКЛЮЧЕН (КЭШИ D+I АКТИВНЫ)\n");
+
+    fast = bench_memfill();
 
     if (fb_init() == 0) {
+        u64 base; u32 w, h, stride;
+
+        /* Фреймбуфер обязан быть некэшируемым: контроллер дисплея
+         * читает DRAM напрямую и о кэшах процессора не знает. */
+        fb_info(&base, &w, &h, &stride);
+        mmu_set_range_nc(base, (u64)stride * h * 4);
+
         fb_set_colors(COLOR_GREEN, COLOR_BLACK);
         fb_clear(COLOR_BLACK);
+        banner();
     }
 
-    banner();
     dump_cpu();
     dump_dtb(dtb_phys);
     dump_fb();
+
+    kprintf("ПАМЯТЬ БЕЗ КЭША : %lu МКС\n", ticks_to_us(slow));
+    kprintf("ПАМЯТЬ С КЭШЕМ  : %lu МКС\n", ticks_to_us(fast));
+    if (fast)
+        kprintf("УСКОРЕНИЕ       : %lu РАЗ\n", slow / fast);
+
     test_pattern();
 
     kprintf("\nBOOT OK. HEARTBEAT:\n");
