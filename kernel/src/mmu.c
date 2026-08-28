@@ -20,12 +20,15 @@
 #include "print.h"
 
 #if defined(BOARD_MERLIN)
-#define DRAM_SIZE   (4UL * 1024 * 1024 * 1024)   /* 4 ГБ; позже возьмём из DTB */
+#include "soc/mt6768.h"
+#define DRAM_BASE   MT_RAM_BASE
+#define DRAM_SIZE   MT_RAM_SIZE
 #else
-#define DRAM_SIZE   (1UL * 1024 * 1024 * 1024)   /* столько даём QEMU */
+#include "soc/qemu_virt.h"
+#define DRAM_BASE   QEMU_RAM_BASE
+#define DRAM_SIZE   QEMU_RAM_SIZE
 #endif
 
-#define DRAM_BASE   0x40000000UL
 #define GB          (1024UL * 1024 * 1024)
 #define MB2         (2UL * 1024 * 1024)
 #define ENTRIES     512

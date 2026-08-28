@@ -12,9 +12,22 @@
 #include "mmu.h"
 #include "gic.h"
 #include "timer.h"
+#include "pmm.h"
+#include "kmalloc.h"
+#include "string.h"
+
+#if defined(BOARD_MERLIN)
+#include "soc/mt6768.h"
+#define RAM_BASE    MT_RAM_BASE
+#define RAM_SIZE    MT_RAM_USABLE
+#else
+#include "soc/qemu_virt.h"
+#define RAM_BASE    QEMU_RAM_BASE
+#define RAM_SIZE    QEMU_RAM_SIZE
+#endif
 
 #define OS_NAME     "VELO-OS"
-#define OS_VERSION  "0.2"
+#define OS_VERSION  "0.3"
 
 /* Частота системного тика. 100 Гц — компромисс: достаточно часто, чтобы
  * планировщик на этапе 4 переключал задачи незаметно для глаза, и достаточно
@@ -23,6 +36,7 @@
 
 static void heartbeat(void);
 static int  irq_works(void);
+static void mem_selftest(void);
 
 /* Заголовок DTB: big-endian, магия 0xd00dfeed */
 struct fdt_header {
@@ -180,6 +194,20 @@ void kmain(u64 dtb_phys)
 
     test_pattern();
 
+    /* Память. Обязательно ПОСЛЕ fb_init: фреймбуфер тоже лежит в DRAM,
+     * его выделил загрузчик, и аллокатор о нём знать не может. Не пометить
+     * его занятым — значит однажды выдать его под кучу и получить кашу
+     * на экране вместо картинки. */
+    if (pmm_init(RAM_BASE, RAM_SIZE, dtb_phys) == 0) {
+        if (fb_available()) {
+            u64 base; u32 w, h, stride;
+
+            fb_info(&base, &w, &h, &stride);
+            pmm_reserve(base, (u64)stride * h * 4);
+        }
+        mem_selftest();
+    }
+
     /* Прерывания. Порядок жёсткий: сперва контроллер, потом таймер
      * (он прописывает себя в контроллер), и только в самом конце снимаем
      * маску DAIF.I. Снять её раньше — поймать прерывание без обработчика. */
@@ -193,6 +221,150 @@ void kmain(u64 dtb_phys)
     kprintf("\nBOOT OK. HEARTBEAT:\n");
 
     heartbeat();
+}
+
+/* Проверка, что весь блок заполнен ожидаемым байтом */
+static int check_fill(const u8 *p, u8 v, u64 n)
+{
+    for (u64 i = 0; i < n; i++)
+        if (p[i] != v)
+            return 0;
+
+    return 1;
+}
+
+/*
+ * Самопроверка памяти.
+ *
+ * Аллокатор — это код, чьи ошибки проявляются не там, где сделаны:
+ * блок, выданный дважды, всплывёт случайной порчей чужих данных через
+ * тысячу операций. Поэтому проверяем сразу и на месте, а результат
+ * печатаем — на телефоне это будет единственный доступный отчёт.
+ */
+static void mem_selftest(void)
+{
+    u64 total, used, grown_before, grown_after, heap_used, blocks;
+    u8 *page, *a, *b, *c, *d;
+    int ok = 1;
+
+    pmm_stats(&total, &used);
+    kprintf("ПАМЯТЬ   : %lu МБ ВСЕГО, %lu МБ СВОБОДНО\n",
+            (total * PAGE_SIZE) / (1024 * 1024),
+            ((total - used) * PAGE_SIZE) / (1024 * 1024));
+
+    /* 1. Страница из pmm: должна прийти обнулённой и держать запись */
+    page = pmm_alloc();
+    if (!page || !check_fill(page, 0, PAGE_SIZE)) {
+        kprintf("ТЕСТ PMM : СТРАНИЦА НЕ ВЫДАНА ИЛИ НЕ ОБНУЛЕНА\n");
+        ok = 0;
+    } else {
+        memset(page, 0xA5, PAGE_SIZE);
+        if (!check_fill(page, 0xA5, PAGE_SIZE)) {
+            kprintf("ТЕСТ PMM : СТРАНИЦА НЕ ДЕРЖИТ ЗАПИСЬ\n");
+            ok = 0;
+        }
+        pmm_free(page);
+    }
+
+    /* 2. Три соседних блока кучи не должны залезать друг на друга.
+     *    Сначала пишем все три, потом проверяем все три: перекрытие
+     *    заметно только так — последняя запись затрёт чужие данные. */
+    a = kmalloc(512);
+    b = kmalloc(512);
+    c = kmalloc(512);
+    if (!a || !b || !c) {
+        kprintf("ТЕСТ КУЧИ: БЛОКИ НЕ ВЫДЕЛИЛИСЬ\n");
+        ok = 0;
+    } else {
+        memset(a, 0x11, 512);
+        memset(b, 0x22, 512);
+        memset(c, 0x33, 512);
+
+        if (!check_fill(a, 0x11, 512) ||
+            !check_fill(b, 0x22, 512) ||
+            !check_fill(c, 0x33, 512)) {
+            kprintf("ТЕСТ КУЧИ: БЛОКИ ПЕРЕКРЫВАЮТСЯ\n");
+            ok = 0;
+        }
+
+        /* 3. Склейка. Освобождаем два соседних блока и просим кусок,
+         *    который заведомо больше любого свободного блока по
+         *    отдельности. Если куча при этом не пошла к pmm за новыми
+         *    страницами — значит соседи действительно склеились. */
+        heap_stats(&grown_before, NULL, NULL);
+        kfree(b);
+        kfree(c);
+
+        d = kmalloc(3000);
+        heap_stats(&grown_after, NULL, NULL);
+
+        if (!d) {
+            kprintf("ТЕСТ КУЧИ: НЕТ БЛОКА ПОСЛЕ СКЛЕЙКИ\n");
+            ok = 0;
+        } else if (grown_after != grown_before) {
+            kprintf("ТЕСТ КУЧИ: СКЛЕЙКИ НЕ ПРОИЗОШЛО, КУЧА ВЫРОСЛА\n");
+            ok = 0;
+        }
+
+        kfree(d);
+        kfree(a);
+    }
+
+    /* 4. Нагрузка. Один цикл «выделил — освободил» проходит и на кривом
+     *    аллокаторе; ошибки в дроблении и склейке вылезают только когда
+     *    блоки разного размера перемешаны и освобождаются вразнобой.
+     *    Каждый блок помечаем своим байтом и проверяем ВСЕ в конце —
+     *    так видно, если два указателя показали на одну память. */
+    {
+        u8 *blocks_arr[32];
+        int stress_ok = 1;
+
+        for (u32 i = 0; i < ARRAY_SIZE(blocks_arr); i++) {
+            u64 sz = 16 + (i * 37) % 700;       /* размеры вразнобой */
+
+            blocks_arr[i] = kmalloc(sz);
+            if (!blocks_arr[i]) {
+                stress_ok = 0;
+                break;
+            }
+            memset(blocks_arr[i], (u8)(i + 1), sz);
+        }
+
+        /* Освобождаем каждый второй — куча становится «дырявой» */
+        for (u32 i = 0; i < ARRAY_SIZE(blocks_arr); i += 2) {
+            if (blocks_arr[i]) {
+                kfree(blocks_arr[i]);
+                blocks_arr[i] = NULL;
+            }
+        }
+
+        /* Оставшиеся обязаны пережить и освобождение соседей, и склейку */
+        for (u32 i = 1; i < ARRAY_SIZE(blocks_arr); i += 2) {
+            u64 sz = 16 + (i * 37) % 700;
+
+            if (blocks_arr[i] && !check_fill(blocks_arr[i], (u8)(i + 1), sz))
+                stress_ok = 0;
+        }
+
+        for (u32 i = 0; i < ARRAY_SIZE(blocks_arr); i++)
+            kfree(blocks_arr[i]);
+
+        if (!stress_ok) {
+            kprintf("ТЕСТ КУЧИ: НАГРУЗКА ИСПОРТИЛА ДАННЫЕ\n");
+            ok = 0;
+        }
+    }
+
+    /* 5. После всех освобождений занятых байт быть не должно */
+    heap_stats(&grown_after, &heap_used, &blocks);
+    if (heap_used != 0) {
+        kprintf("ТЕСТ КУЧИ: УТЕЧКА %lu БАЙТ\n", heap_used);
+        ok = 0;
+    }
+
+    kprintf("КУЧА     : %lu КБ У PMM, БЛОКОВ %lu, ЗАНЯТО %lu\n",
+            grown_after / 1024, blocks, heap_used);
+    kprintf("ТЕСТ     : %s\n", ok ? "ПАМЯТЬ РАБОТАЕТ" : "ЕСТЬ ОШИБКИ (СМ. ВЫШЕ)");
 }
 
 /*
