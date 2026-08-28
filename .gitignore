@@ -1,0 +1,6 @@
+kernel/build/
+prebuilt/backup/
+*.img
+*.bin
+*.o
+*.elf
