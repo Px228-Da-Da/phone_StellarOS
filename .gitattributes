@@ -1,0 +1,11 @@
+# Всё, что читает Linux-инструментарий (WSL, gcc, bash), обязано быть с LF.
+# Иначе после checkout на Windows скрипты падают с "bad interpreter: ^M".
+* text=auto eol=lf
+*.sh   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.S    text eol=lf
+*.ld   text eol=lf
+Makefile text eol=lf
+*.img  binary
+*.bin  binary
