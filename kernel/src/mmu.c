@@ -139,6 +139,11 @@ int mmu_enable_cpu(void)
     return 0;
 }
 
+u64 mmu_ram_limit(void)
+{
+    return DRAM_BASE + DRAM_SIZE;
+}
+
 void mmu_set_range_nc(u64 pa, u64 size)
 {
     u64 start = pa & ~(MB2 - 1);

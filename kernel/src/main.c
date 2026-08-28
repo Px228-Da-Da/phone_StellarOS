@@ -18,6 +18,7 @@
 #include "smp.h"
 #include "sched.h"
 #include "spinlock.h"
+#include "fdt.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -42,6 +43,7 @@ static void heartbeat_polling(void);
 static int  irq_works(void);
 static void mem_selftest(void);
 static void worker_task(void *arg);
+static void memory_setup(u64 dtb_phys);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -159,6 +161,107 @@ static void dump_fb(void)
     kprintf("FB ADDR  : %p\n", (void *)(uintptr_t)base);
 }
 
+/*
+ * Разметка памяти по device tree.
+ *
+ * Раньше объём и база памяти были константами в карте SoC. Теперь их
+ * сообщает само устройство, и главное — вместе с ними приходит список
+ * областей, которые трогать нельзя: ATF, доверенная память, буферы модема,
+ * фреймбуфер. На merlin таких областей два десятка, они разбросаны внутри
+ * той же DRAM и закрыты контроллером EMI. Выдать такую область под кучу —
+ * это не порча данных, а мгновенная перезагрузка без единого сообщения.
+ */
+static void memory_setup(u64 dtb_phys)
+{
+    struct fdt_region mem[4];
+    struct fdt_region res[48];
+    u32 nmem = 0, nres = 0;
+    u64 base = RAM_BASE, size = RAM_SIZE;
+
+    if (fdt_check(dtb_phys) == 0) {
+        const char *model = fdt_root_string(dtb_phys, "model");
+
+        if (model)
+            kprintf("ПЛАТА    : %s\n", model);
+
+        nmem = fdt_memory(dtb_phys, mem, ARRAY_SIZE(mem));
+        nres = fdt_reserved(dtb_phys, res, ARRAY_SIZE(res));
+    }
+
+    if (nmem) {
+        base = mem[0].base;
+        size = mem[0].size;
+        kprintf("ПАМЯТЬ DTB: %p .. %p (%lu МБ), ОБЛАСТЕЙ %u\n",
+                (void *)(uintptr_t)base, (void *)(uintptr_t)(base + size),
+                size / (1024 * 1024), nmem);
+
+        /* Несколько несмежных банков pmm пока не умеет: он ведёт одну
+         * карту на непрерывный диапазон. Молчать об этом нельзя —
+         * пропавшая память должна быть видна, а не потеряна тихо. */
+        for (u32 i = 1; i < nmem; i++)
+            kprintf("           ЕЩЁ %p (%lu МБ) — НЕ ИСПОЛЬЗУЕТСЯ\n",
+                    (void *)(uintptr_t)mem[i].base, mem[i].size / (1024 * 1024));
+    } else {
+        kprintf("ПАМЯТЬ    : В DTB НЕ НАЙДЕНА, БЕРУ ВСТРОЕННУЮ КАРТУ\n");
+    }
+
+    /*
+     * Дерево описывает физическую память, а таблицы трансляции строятся
+     * при загрузке по константе из карты SoC. Если устройство окажется
+     * богаче, чем мы отобразили, аллокатор начнёт раздавать адреса, для
+     * которых трансляции нет: первое же обращение — ошибка доступа далеко
+     * от места настоящей причины. Поэтому обрезаем и говорим об этом вслух.
+     */
+    if (base + size > mmu_ram_limit()) {
+        u64 fit = base < mmu_ram_limit() ? mmu_ram_limit() - base : 0;
+
+        kprintf("ПАМЯТЬ    : ОТОБРАЖЕНО ДО %p, ОБРЕЗАЮ %lu МБ ДО %lu МБ\n",
+                (void *)(uintptr_t)mmu_ram_limit(),
+                size / (1024 * 1024), fit / (1024 * 1024));
+        size = fit;
+    }
+
+    if (!size) {
+        kprintf("ПАМЯТЬ    : РАЗДАВАТЬ НЕЧЕГО\n");
+        return;
+    }
+
+#if defined(BOARD_MERLIN)
+    /*
+     * На телефоне без списка защищённых областей аллокатор запускать нельзя.
+     * Никакой «осторожный объём» тут не спасает: ATF и доверенная память
+     * лежат в первых же сотнях мегабайт, вперемешку с обычной DRAM.
+     * Лучше остаться без кучи и задач, чем получить ресет на ровном месте.
+     */
+    if (!nres) {
+        kprintf("ПАМЯТЬ    : СПИСОК ЗАЩИЩЁННЫХ ОБЛАСТЕЙ ПУСТ — PMM НЕ ЗАПУСКАЮ\n");
+        kprintf("            СМ. docs/01-safety.md, ПРАВИЛО 4\n");
+        return;
+    }
+#endif
+
+    if (pmm_init(base, size, dtb_phys) != 0)
+        return;
+
+    for (u32 i = 0; i < nres; i++)
+        pmm_reserve(res[i].base, res[i].size);
+
+    if (nres)
+        kprintf("ЗАЩИЩЕНО : %u ОБЛАСТЕЙ ИЗ DTB\n", nres);
+
+    /* Фреймбуфер загрузчика в /reserved-memory обычно есть, но полагаться
+     * на это не станем: свой адрес мы и так знаем от контроллера дисплея. */
+    if (fb_available()) {
+        u64 fb_base;
+        u32 w, h, stride;
+
+        fb_info(&fb_base, &w, &h, &stride);
+        pmm_reserve(fb_base, (u64)stride * h * 4);
+    }
+
+    mem_selftest();
+}
+
 /* Цветные полосы: видны, даже если шрифт вдруг рисуется неверно */
 static void test_pattern(void)
 {
@@ -184,6 +287,10 @@ void kmain(u64 dtb_phys)
     /* Своя per-CPU запись до всего остального: this_cpu() понадобится
      * и таймеру, и GIC, и планировщику. Загрузочное ядро всегда номер 0. */
     percpu_init(0, read_mpidr());
+
+    /* Дерево от загрузчика запоминаем сразу: из него берут адреса
+     * и разметку памяти и GIC, и pmm. */
+    fdt_set_root(dtb_phys);
 
     uart_init();
     banner();
@@ -222,18 +329,8 @@ void kmain(u64 dtb_phys)
     test_pattern();
 
     /* Память. Обязательно ПОСЛЕ fb_init: фреймбуфер тоже лежит в DRAM,
-     * его выделил загрузчик, и аллокатор о нём знать не может. Не пометить
-     * его занятым — значит однажды выдать его под кучу и получить кашу
-     * на экране вместо картинки. */
-    if (pmm_init(RAM_BASE, RAM_SIZE, dtb_phys) == 0) {
-        if (fb_available()) {
-            u64 base; u32 w, h, stride;
-
-            fb_info(&base, &w, &h, &stride);
-            pmm_reserve(base, (u64)stride * h * 4);
-        }
-        mem_selftest();
-    }
+     * его выделил загрузчик, и аллокатор о нём знать не может. */
+    memory_setup(dtb_phys);
 
     /* Прерывания. Порядок жёсткий: сперва контроллер, потом таймер
      * (он прописывает себя в контроллер), и только в самом конце снимаем

@@ -15,16 +15,22 @@
 #include "print.h"
 #include "smp.h"
 #include "spinlock.h"
+#include "fdt.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
-#define GICD_BASE   MT_GICD_BASE
-#define GICR_BASE   MT_GICR_BASE
+#define GICD_DEFAULT   MT_GICD_BASE
+#define GICR_DEFAULT   MT_GICR_BASE
 #else
 #include "soc/qemu_virt.h"
-#define GICD_BASE   QEMU_GICD_BASE
-#define GICR_BASE   QEMU_GICR_BASE
+#define GICD_DEFAULT   QEMU_GICD_BASE
+#define GICR_DEFAULT   QEMU_GICR_BASE
 #endif
+
+/* Значения из карты SoC — только отправная точка: если есть device tree,
+ * адреса берутся оттуда (см. gic_bases_from_fdt). */
+static u64 gicd_base = GICD_DEFAULT;
+static u64 gicr_base = GICR_DEFAULT;
 
 /* --- Distributor --- */
 #define GICD_CTLR           0x0000
@@ -87,7 +93,7 @@ static u64 gicr_find_self(void)
     u64 mpidr = read_mpidr();
     /* Aff3.Aff2.Aff1.Aff0 в том же виде, в каком лежит в GICR_TYPER[63:32] */
     u32 want = (u32)((mpidr & 0x00FFFFFFUL) | ((mpidr >> 8) & 0xFF000000UL));
-    u64 base = GICR_BASE;
+    u64 base = gicr_base;
 
     /*
      * Конец списка помечает бит Last в GICR_TYPER — на него и полагаемся.
@@ -202,9 +208,45 @@ int gic_init_cpu(void)
     return 0;
 }
 
+/*
+ * Взять адреса контроллера из device tree.
+ *
+ * Раньше обе базы были константами: дистрибьютор снят с имени узла живого
+ * устройства, а редистрибьютор — взят по раскладке GIC-500 из чужих ядер,
+ * то есть оставался единственной непроверенной величиной в карте регистров.
+ * Дерево знает оба адреса точно, и знает их про ЭТО устройство.
+ *
+ * Константы остаются запасным вариантом: дерева может и не быть.
+ */
+static void gic_bases_from_fdt(void)
+{
+    struct fdt_region r;
+    u64 dtb = fdt_root();
+
+    if (!dtb)
+        return;
+
+    if (fdt_compatible_reg(dtb, "arm,gic-v3", 0, &r) == 0 && r.base) {
+        if (r.base != gicd_base)
+            kprintf("GIC      : GICD ИЗ DTB %p (В КАРТЕ БЫЛО %p)\n",
+                    (void *)(uintptr_t)r.base, (void *)(uintptr_t)gicd_base);
+        gicd_base = r.base;
+    }
+
+    if (fdt_compatible_reg(dtb, "arm,gic-v3", 1, &r) == 0 && r.base) {
+        if (r.base != gicr_base)
+            kprintf("GIC      : GICR ИЗ DTB %p (В КАРТЕ БЫЛО %p)\n",
+                    (void *)(uintptr_t)r.base, (void *)(uintptr_t)gicr_base);
+        gicr_base = r.base;
+    }
+}
+
 int gic_init(void)
 {
     u32 ctlr;
+
+    /* Адреса уточняем ДО первого обращения к железу */
+    gic_bases_from_fdt();
 
     if (gic_init_cpu() != 0)
         return -1;
@@ -213,12 +255,12 @@ int gic_init(void)
      * Именно read-modify-write: на телефоне дистрибьютор уже настроен
      * ATF, и затирать его биты своими — верный способ потерять
      * прерывания, о которых мы пока ничего не знаем. */
-    ctlr = mmio_read32(GICD_BASE + GICD_CTLR);
-    mmio_write32(GICD_BASE + GICD_CTLR, ctlr | GICD_CTLR_ARE_NS | GICD_CTLR_ENGRP1NS);
+    ctlr = mmio_read32(gicd_base + GICD_CTLR);
+    mmio_write32(gicd_base + GICD_CTLR, ctlr | GICD_CTLR_ARE_NS | GICD_CTLR_ENGRP1NS);
     dsb();
 
     kprintf("GIC      : GICv3, GICD %p, GICR %p\n",
-            (void *)(uintptr_t)GICD_BASE, (void *)(uintptr_t)my_gicr());
+            (void *)(uintptr_t)gicd_base, (void *)(uintptr_t)my_gicr());
     return 0;
 }
 
@@ -240,14 +282,14 @@ void gic_enable_irq(u32 intid, u32 prio, irq_handler_fn fn)
     } else {
         /* SPI: сначала группа и маршрут, только потом включение —
          * иначе прерывание может прийти раньше, чем решено, куда его слать. */
-        u32 g = mmio_read32(GICD_BASE + GICD_IGROUPR + reg * 4);
+        u32 g = mmio_read32(gicd_base + GICD_IGROUPR + reg * 4);
 
-        mmio_write32(GICD_BASE + GICD_IGROUPR + reg * 4, g | bit);
-        mmio_write32(GICD_BASE + GICD_IPRIORITYR + intid, prio);
+        mmio_write32(gicd_base + GICD_IGROUPR + reg * 4, g | bit);
+        mmio_write32(gicd_base + GICD_IPRIORITYR + intid, prio);
         /* Маршрут: конкретному ядру, тому самому, где сейчас исполняемся */
-        mmio_write64(GICD_BASE + GICD_IROUTER + intid * 8,
+        mmio_write64(gicd_base + GICD_IROUTER + intid * 8,
                      read_mpidr() & 0xFF00FFFFFFUL);
-        mmio_write32(GICD_BASE + GICD_ISENABLER + reg * 4, bit);
+        mmio_write32(gicd_base + GICD_ISENABLER + reg * 4, bit);
     }
     dsb();
 }

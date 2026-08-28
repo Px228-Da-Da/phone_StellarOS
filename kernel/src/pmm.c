@@ -21,6 +21,7 @@
 #include "print.h"
 #include "io.h"
 #include "spinlock.h"
+#include "fdt.h"
 
 /*
  * Замок на всю карту. Выделение страницы — это «найти нулевой бит и
@@ -113,10 +114,14 @@ int pmm_init(u64 ram_base, u64 ram_size, u64 dtb_phys)
      * и выдать эту память под кучу означало бы затереть их данные. */
     pmm_reserve(ram_base, (image_end + bitmap_bytes) - ram_base);
 
-    /* DTB нам ещё понадобится на этапе 5 — держим его нетронутым.
-     * Реальный размер лежит в его заголовке, но пока хватит запаса. */
-    if (dtb_phys)
-        pmm_reserve(dtb_phys, 2 * 1024 * 1024);
+    /* Само дерево тоже держим нетронутым: из него ещё читать адреса
+     * устройств. Размер берём из его заголовка — раньше тут стоял запас
+     * в два мегабайта, потому что читать заголовок было нечем. */
+    if (dtb_phys) {
+        u64 dtb_size = fdt_total_size(dtb_phys);
+
+        pmm_reserve(dtb_phys, dtb_size ? dtb_size : 2 * 1024 * 1024);
+    }
 
     search_hint = 0;
 

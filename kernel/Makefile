@@ -32,7 +32,11 @@ endif
 # -mstrict-align обязателен: MMU выключен, вся память трактуется как Device,
 #   а невыровненный доступ к Device-памяти = alignment fault.
 # -mgeneral-regs-only: не трогаем SIMD/FPU, пока не включили их в CPACR.
-CFLAGS := -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+# -MMD -MP: компилятор сам записывает, от каких заголовков зависит объектник.
+# Без этого правка любого .h не вызывала пересборку вообще — файл менялся,
+# а в образ ехал старый объектник, и проверка «сломаю константу и посмотрю»
+# молча проверяла предыдущую сборку.
+CFLAGS := -MMD -MP -ffreestanding -nostdlib -nostartfiles -fno-builtin \
           -fno-stack-protector -fno-pic -fno-common \
           -mgeneral-regs-only -mstrict-align \
           -march=armv8-a \
@@ -105,5 +109,8 @@ debug:
 
 clean:
 	rm -rf build
+
+# Зависимости от заголовков, записанные компилятором
+-include $(OBJS:.o=.d)
 
 .PHONY: all run run-phone debug clean
