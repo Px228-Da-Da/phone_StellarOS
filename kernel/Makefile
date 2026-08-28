@@ -17,10 +17,14 @@ BUILD := build/$(BOARD)
 
 ifeq ($(BOARD),qemu)
   BOARD_DEF := -DBOARD_QEMU
+else ifeq ($(BOARD),phone)
+  # Тот же QEMU, но с телефонными параметрами: 4 ГБ памяти.
+  # Остальное «как на телефоне» задаётся в строке запуска (см. run-phone).
+  BOARD_DEF := -DBOARD_QEMU -DQEMU_RAM_SIZE_MB=4096
 else ifeq ($(BOARD),merlin)
   BOARD_DEF := -DBOARD_MERLIN
 else
-  $(error BOARD должен быть qemu или merlin)
+  $(error BOARD должен быть qemu, phone или merlin)
 endif
 
 # -march=armv8-a (без -mcpu): merlin — big.LITTLE из Cortex-A75 и A55.
@@ -76,6 +80,16 @@ run: $(BUILD)/Image
 	$(QEMU) \
 	    -kernel $(BUILD)/Image
 
+# Запуск в конфигурации, максимально близкой к Redmi Note 9:
+#   cortex-a55   — малые ядра Helio G85 (большие A75 QEMU не эмулирует,
+#                  но набор инструкций у них общий — ARMv8.2)
+#   2 кластера   — как в G85; ядра второго кластера имеют Aff1=1, и вся
+#                  работа с MPIDR проверяется по-настоящему только так
+#   4 ГБ         — как в старшей версии телефона
+run-phone: BOARD := phone
+run-phone: $(BUILD)/Image
+	qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a55 	    -smp 8,clusters=2,cores=4,threads=1 -m 4G -nographic 	    -kernel $(BUILD)/Image
+
 debug: BOARD := qemu
 debug: $(BUILD)/Image
 	@echo "Ожидаю gdb на localhost:1234 ..."
@@ -85,4 +99,4 @@ debug: $(BUILD)/Image
 clean:
 	rm -rf build
 
-.PHONY: all run debug clean
+.PHONY: all run run-phone debug clean

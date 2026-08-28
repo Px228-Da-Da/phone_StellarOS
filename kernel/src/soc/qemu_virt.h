@@ -5,9 +5,15 @@
  * приезжает любая новая фича, и только потом на телефон.
  */
 
-/* DRAM. Размер должен совпадать с -m в строке запуска QEMU (см. Makefile) */
+/* DRAM. Размер должен совпадать с -m в строке запуска QEMU (см. Makefile).
+ * Задаётся при сборке: BOARD=phone поднимает его до телефонных 4 ГБ,
+ * чтобы проверить и отображение всей памяти, и большую карту страниц. */
+#ifndef QEMU_RAM_SIZE_MB
+#define QEMU_RAM_SIZE_MB    1024
+#endif
+
 #define QEMU_RAM_BASE       0x40000000UL
-#define QEMU_RAM_SIZE       (1024UL * 1024 * 1024)
+#define QEMU_RAM_SIZE       ((u64)QEMU_RAM_SIZE_MB * 1024 * 1024)
 
 #define QEMU_UART0_BASE     0x09000000UL    /* PL011                     */
 
