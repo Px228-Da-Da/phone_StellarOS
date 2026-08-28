@@ -30,14 +30,17 @@ static struct {
 } fb;
 
 #if defined(BOARD_MERLIN)
-#include "soc/mt6769.h"
+#include "soc/mt6768.h"
 
-/* Регистры MediaTek DISP_OVL — смещения одинаковы во всём семействе
- * (см. drivers/gpu/drm/mediatek/mtk_disp_ovl.c) */
-#define MT_DISP_OVL0_BASE       0x14008000UL    /* TODO-VERIFY по merlin DTS */
-#define OVL_L0_SRC_SIZE         0x0038          /* [31:16]=h, [15:0]=w        */
-#define OVL_L0_PITCH            0x0044          /* байт в строке              */
-#define OVL_L0_ADDR             0x0F40          /* физический адрес буфера    */
+/*
+ * Адреса DISP_OVL0 и смещения регистров живут в soc/mt6768.h.
+ * Базовый адрес 0x1400B000 снят с живого устройства (disp_ovl0@1400b000).
+ *
+ * Есть и второй, ещё более надёжный источник адреса фреймбуфера:
+ * LK кладёт его в передаваемый нам DTB как chosen/atag,videolfb-fb_base_h
+ * и ...-fb_base_l. Перейдём на него, когда напишем разбор DTB (этап 5);
+ * пока читаем регистр оверлея — он не требует парсера.
+ */
 
 static int fb_probe(void)
 {

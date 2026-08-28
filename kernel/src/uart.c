@@ -36,7 +36,7 @@ int uart_getc_nb(void)
 }
 
 #elif defined(BOARD_MERLIN)
-#include "soc/mt6769.h"
+#include "soc/mt6768.h"
 #define UART_BASE MT_UART0_BASE
 
 void uart_init(void)
