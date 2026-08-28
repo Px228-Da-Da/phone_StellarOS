@@ -69,32 +69,39 @@ $(BUILD)/Image: $(BUILD)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
 	@echo "Готово: $@ ($$(stat -c%s $@) байт)"
 
-# gic-version=3 обязателен: в merlin стоит GIC-500 (v3), и мы хотим отлаживать
-# в эмуляторе ровно тот код, который поедет на телефон.
-# -smp 8 — столько же ядер, сколько у Helio G85: планировщик и PSCI
-# проверяются в тех же условиях, что и на телефоне.
-QEMU := qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a53 -smp 8 -m 1G -nographic
+# Запуск в эмуляторе.
+#
+# Сборку вызываем отдельным make с явным BOARD. Причина не в стиле:
+# BUILD вычисляется один раз при разборе Makefile, и «run-phone: BOARD := phone»
+# на него уже не влияет — из-за этого run-phone однажды честно собрал и запустил
+# сборку для qemu, молча подсунув 1 ГБ вместо телефонных 4.
+#
+# gic-version=3 обязателен везде: в merlin стоит GIC-500 (v3), и отлаживать
+# надо ровно тот код, который поедет на телефон.
+QEMU_BASE := qemu-system-aarch64 -M virt,gic-version=3 -nographic
 
-run: BOARD := qemu
-run: $(BUILD)/Image
-	$(QEMU) \
-	    -kernel $(BUILD)/Image
+run:
+	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
+	$(QEMU_BASE) -cpu cortex-a53 -smp 8 -m 1G -kernel build/qemu/Image
 
-# Запуск в конфигурации, максимально близкой к Redmi Note 9:
-#   cortex-a55   — малые ядра Helio G85 (большие A75 QEMU не эмулирует,
-#                  но набор инструкций у них общий — ARMv8.2)
-#   2 кластера   — как в G85; ядра второго кластера имеют Aff1=1, и вся
-#                  работа с MPIDR проверяется по-настоящему только так
-#   4 ГБ         — как в старшей версии телефона
-run-phone: BOARD := phone
-run-phone: $(BUILD)/Image
-	qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a55 	    -smp 8,clusters=2,cores=4,threads=1 -m 4G -nographic 	    -kernel $(BUILD)/Image
+# Конфигурация, максимально близкая к Redmi Note 9:
+#   cortex-a55 — малые ядра Helio G85; большие A75 QEMU не эмулирует,
+#                но набор инструкций у них общий
+#   8 ядер     — как у G85
+#   4 ГБ       — как у старшей версии телефона, и сборка BOARD=phone
+#                знает про этот объём: иначе ядро распорядится лишь гигабайтом
+#
+# Кластеры здесь не задаём: при GICv3 QEMU кладёт в кластер 16 ядер, и на
+# восьми ядрах «clusters=2» меняет только описание в DTB, а MPIDR оставляет
+# плоскими. Второй кластер проверяется отдельно, запуском с -smp 20.
+run-phone:
+	@$(MAKE) --no-print-directory BOARD=phone build/phone/Image
+	$(QEMU_BASE) -cpu cortex-a55 -smp 8 -m 4G -kernel build/phone/Image
 
-debug: BOARD := qemu
-debug: $(BUILD)/Image
+debug:
+	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
 	@echo "Ожидаю gdb на localhost:1234 ..."
-	$(QEMU) \
-	    -kernel $(BUILD)/Image -S -s
+	$(QEMU_BASE) -cpu cortex-a53 -smp 8 -m 1G -kernel build/qemu/Image -S -s
 
 clean:
 	rm -rf build
