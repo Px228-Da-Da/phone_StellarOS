@@ -1,7 +1,21 @@
 #include "print.h"
 #include "uart.h"
 #include "fb.h"
+#include "spinlock.h"
 #include <stdarg.h>
+
+/*
+ * Замок печати.
+ *
+ * С появлением второго ядра вывод перестал быть безобидным: восемь ядер,
+ * печатающих одновременно, дают на экране кашу из перемешанных посимвольно
+ * строк, и первое же сообщение об ошибке становится нечитаемым — именно
+ * тогда, когда оно нужнее всего.
+ *
+ * Замок берётся с запретом прерываний: kprintf вызывается и из обработчиков,
+ * а прерывание на том же ядре внутри удерживаемого замка ждало бы само себя.
+ */
+static struct spinlock print_lock = SPINLOCK_INIT("print");
 
 /* Единая точка вывода: всё, что печатаем, идёт в оба канала */
 static void emit(char c)
@@ -10,10 +24,18 @@ static void emit(char c)
     fb_putc(c);
 }
 
-void kputs(const char *s)
+static void emit_str(const char *s)
 {
     while (*s)
         emit(*s++);
+}
+
+void kputs(const char *s)
+{
+    u64 flags = spin_lock_irq(&print_lock);
+
+    emit_str(s);
+    spin_unlock_irq(&print_lock, flags);
 }
 
 static void emit_u64(u64 v, unsigned base, int width, char pad)
@@ -37,6 +59,8 @@ static void emit_u64(u64 v, unsigned base, int width, char pad)
 void kprintf(const char *fmt, ...)
 {
     va_list ap;
+    u64 flags = spin_lock_irq(&print_lock);
+
     va_start(ap, fmt);
 
     for (; *fmt; fmt++) {
@@ -57,7 +81,7 @@ void kprintf(const char *fmt, ...)
         switch (*fmt) {
         case 's': {
             const char *s = va_arg(ap, const char *);
-            kputs(s ? s : "(null)");
+            emit_str(s ? s : "(null)");
             break;
         }
         case 'c':
@@ -80,7 +104,7 @@ void kprintf(const char *fmt, ...)
             break;
         }
         case 'p':
-            kputs("0x");
+            emit_str("0x");
             emit_u64((u64)va_arg(ap, void *), 16, 16, '0');
             break;
         case '%':
@@ -92,4 +116,5 @@ void kprintf(const char *fmt, ...)
         }
     }
     va_end(ap);
+    spin_unlock_irq(&print_lock, flags);
 }

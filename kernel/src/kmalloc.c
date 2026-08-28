@@ -17,6 +17,12 @@
 #include "pmm.h"
 #include "string.h"
 #include "print.h"
+#include "spinlock.h"
+
+/* Один замок на всю кучу: список блоков общий, и любое изменение —
+ * дробление, склейка, вставка нового куска — рвёт связи, которые в этот
+ * же момент читает другое ядро. */
+static struct spinlock heap_lock = SPINLOCK_INIT("heap");
 
 #define HEAP_MAGIC      0x4F4C4556U         /* "VELO" — метка целостности */
 #define HEAP_ALIGN      16UL                /* требование AArch64 ABI     */
@@ -112,29 +118,36 @@ static void block_split(struct block *b, u64 need)
 
 void *kmalloc(size_t size)
 {
-    u64 need;
+    u64 need, flags;
     struct block *b;
+    void *result = NULL;
 
     if (!size)
         return NULL;
 
     need = align_up(size, HEAP_ALIGN);
+    flags = spin_lock_irq(&heap_lock);
 
     for (b = head; b; b = b->next) {
         if (b->free && b->size >= need) {
             block_split(b, need);
             b->free = 0;
-            return block_data(b);
+            result = block_data(b);
+            break;
         }
     }
 
-    b = heap_grow(need);
-    if (!b)
-        return NULL;
+    if (!result) {
+        b = heap_grow(need);
+        if (b) {
+            block_split(b, need);
+            b->free = 0;
+            result = block_data(b);
+        }
+    }
 
-    block_split(b, need);
-    b->free = 0;
-    return block_data(b);
+    spin_unlock_irq(&heap_lock, flags);
+    return result;
 }
 
 void *kzalloc(size_t size)
@@ -170,31 +183,37 @@ static void heap_coalesce(void)
 void kfree(void *ptr)
 {
     struct block *b;
+    u64 flags;
 
     if (!ptr)
         return;
 
     b = (struct block *)((u8 *)ptr - sizeof(struct block));
+    flags = spin_lock_irq(&heap_lock);
 
     /* Метка ловит две классические ошибки: освобождение чужого указателя
      * и повреждение заголовка записью за границу соседнего блока.
      * Молча продолжать тут нельзя — дальше поедет весь список. */
     if (b->magic != HEAP_MAGIC) {
+        spin_unlock_irq(&heap_lock, flags);
         kprintf("KMALLOC  : ИСПОРЧЕН ЗАГОЛОВОК БЛОКА %p\n", ptr);
         return;
     }
     if (b->free) {
+        spin_unlock_irq(&heap_lock, flags);
         kprintf("KMALLOC  : ПОВТОРНОЕ ОСВОБОЖДЕНИЕ %p\n", ptr);
         return;
     }
 
     b->free = 1;
     heap_coalesce();
+    spin_unlock_irq(&heap_lock, flags);
 }
 
 void heap_stats(u64 *total, u64 *used, u64 *blocks)
 {
     u64 u = 0, n = 0;
+    u64 flags = spin_lock_irq(&heap_lock);
 
     for (struct block *b = head; b; b = b->next) {
         n++;
@@ -208,4 +227,6 @@ void heap_stats(u64 *total, u64 *used, u64 *blocks)
         *used = u;
     if (blocks)
         *blocks = n;
+
+    spin_unlock_irq(&heap_lock, flags);
 }

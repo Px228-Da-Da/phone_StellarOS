@@ -20,6 +20,15 @@
 #include "string.h"
 #include "print.h"
 #include "io.h"
+#include "spinlock.h"
+
+/*
+ * Замок на всю карту. Выделение страницы — это «найти нулевой бит и
+ * поставить его»: без замка два ядра находят один и тот же бит и получают
+ * одну и ту же страницу под разные нужды. Такую ошибку почти невозможно
+ * поймать потом: память просто начинает портиться в случайных местах.
+ */
+static struct spinlock pmm_lock = SPINLOCK_INIT("pmm");
 
 /* Границы образа расставляет линкер, см. linker.ld */
 extern char __image_start[];
@@ -119,8 +128,12 @@ int pmm_init(u64 ram_base, u64 ram_size, u64 dtb_phys)
 
 void *pmm_alloc_pages(u32 count)
 {
+    u64 flags;
+
     if (!count || !bitmap)
         return NULL;
+
+    flags = spin_lock_irq(&pmm_lock);
 
     /* Ищем count свободных подряд. Начинаем с подсказки, но при неудаче
      * обязательно доходим до конца и заходим на второй круг — иначе после
@@ -143,6 +156,11 @@ void *pmm_alloc_pages(u32 count)
 
                 void *p = (void *)(uintptr_t)(base_addr + (i << PAGE_SHIFT));
 
+                /* Обнулять можно уже без замка: страница помечена занятой,
+                 * и никто другой её не увидит. Держать замок на время
+                 * memset значило бы останавливать остальные ядра зря. */
+                spin_unlock_irq(&pmm_lock, flags);
+
                 /* Обнуляем всегда: выданная страница не должна приносить
                  * следующему владельцу чужие данные. */
                 memset(p, 0, count * PAGE_SIZE);
@@ -154,6 +172,7 @@ void *pmm_alloc_pages(u32 count)
         }
     }
 
+    spin_unlock_irq(&pmm_lock, flags);
     return NULL;
 }
 
@@ -166,17 +185,22 @@ void pmm_free_pages(void *page, u32 count)
 {
     u64 addr = (u64)(uintptr_t)page;
     u64 i = page_index(addr);
+    u64 flags;
 
     if (!page || (addr & (PAGE_SIZE - 1)) || i == (u64)-1) {
         kprintf("PMM      : ПОПЫТКА ОСВОБОДИТЬ ЧУЖОЙ АДРЕС %p\n", page);
         return;
     }
 
+    flags = spin_lock_irq(&pmm_lock);
+
     for (u64 k = 0; k < count && i + k < total_pages; k++)
         page_mark_free(i + k);
 
     if (i < search_hint)
         search_hint = i;
+
+    spin_unlock_irq(&pmm_lock, flags);
 }
 
 void pmm_free(void *page)

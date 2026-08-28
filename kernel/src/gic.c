@@ -13,6 +13,8 @@
 #include "gic.h"
 #include "io.h"
 #include "print.h"
+#include "smp.h"
+#include "spinlock.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -67,7 +69,10 @@
 #define INTID_SPURIOUS      1020        /* ответ GIC: прерываний больше нет */
 #define INTID_MASK          0xFFFFFF
 
-static u64 gicr;                        /* кадр редистрибьютора нашего ядра */
+/* Редистрибьютор у каждого ядра свой, поэтому его база живёт
+ * в per-CPU структуре, а не в общей переменной. */
+#define my_gicr()   (this_cpu()->gicr)
+
 static irq_handler_fn handlers[GIC_MAX_IRQS];
 static u64 irq_count;
 static u64 spurious_count;
@@ -98,7 +103,7 @@ static u64 gicr_find_self(void)
 
 /* Разбудить редистрибьютор: после сброса он считает ядро спящим
  * и не доставляет ему ничего. */
-static int gicr_wake(void)
+static int gicr_wake(u64 gicr)
 {
     u32 w = mmio_read32(gicr + GICR_WAKER);
 
@@ -128,9 +133,17 @@ static int gic_sysreg_supported(void)
     return ((pfr0 >> 24) & 0xF) != 0;
 }
 
-int gic_init(void)
+/*
+ * Настройка интерфейса прерываний ТЕКУЩЕГО ядра.
+ *
+ * Всё, что здесь делается, — процессорное: регистры ICC_* принадлежат
+ * ядру, редистрибьютор у каждого ядра свой. Настройки CPU0 на разбуженные
+ * ядра не распространяются никак, поэтому каждое повторяет это само.
+ */
+int gic_init_cpu(void)
 {
-    u32 ctlr;
+    struct cpu *c = this_cpu();
+    u64 gicr;
 
     if (!gic_sysreg_supported()) {
         kprintf("GIC      : ПРОЦЕССОР НЕ ВИДИТ GICv3 (СТОИТ v2?)\n");
@@ -146,16 +159,17 @@ int gic_init(void)
         return -1;
     }
 
-    /* 2. Свой редистрибьютор */
+    /* 2. Свой редистрибьютор — тот, чьё аффинити совпадает с нашим MPIDR */
     gicr = gicr_find_self();
     if (!gicr) {
-        kprintf("GIC      : РЕДИСТРИБЬЮТОР НЕ НАЙДЕН\n");
+        kprintf("GIC      : РЕДИСТРИБЬЮТОР НЕ НАЙДЕН (ЯДРО %lu)\n", c->id);
         return -1;
     }
-    if (gicr_wake() != 0) {
-        kprintf("GIC      : РЕДИСТРИБЬЮТОР НЕ ПРОСНУЛСЯ\n");
+    if (gicr_wake(gicr) != 0) {
+        kprintf("GIC      : РЕДИСТРИБЬЮТОР НЕ ПРОСНУЛСЯ (ЯДРО %lu)\n", c->id);
         return -1;
     }
+    c->gicr = gicr;
 
     /* 3. SGI и PPI: гасим всё и снимаем зависшие флаги ожидания.
      *    Загрузчик мог оставить включённым что угодно, а обработчиков
@@ -166,15 +180,7 @@ int gic_init(void)
     mmio_write32(gicr + GICR_IGROUPR0,   0xFFFFFFFF);
     dsb();
 
-    /* 4. Дистрибьютор: включаем маршрутизацию по аффинити и группу 1.
-     *    Именно read-modify-write: на телефоне дистрибьютор уже настроен
-     *    ATF, и затирать его биты своими — верный способ потерять
-     *    прерывания, о которых мы пока ничего не знаем. */
-    ctlr = mmio_read32(GICD_BASE + GICD_CTLR);
-    mmio_write32(GICD_BASE + GICD_CTLR, ctlr | GICD_CTLR_ARE_NS | GICD_CTLR_ENGRP1NS);
-    dsb();
-
-    /* 5. CPU-интерфейс: пропускаем прерывания любого приоритета,
+    /* 4. CPU-интерфейс: пропускаем прерывания любого приоритета,
      *    без деления на подприоритеты, группа 1 включена. */
     SYSREG_WRITE(ICC_PMR_EL1, 0xFF);
     SYSREG_WRITE(ICC_BPR1_EL1, 0);
@@ -182,8 +188,26 @@ int gic_init(void)
     SYSREG_WRITE(ICC_IGRPEN1_EL1, 1);
     isb();
 
+    return 0;
+}
+
+int gic_init(void)
+{
+    u32 ctlr;
+
+    if (gic_init_cpu() != 0)
+        return -1;
+
+    /* Дистрибьютор один на систему, и настраивает его только CPU0.
+     * Именно read-modify-write: на телефоне дистрибьютор уже настроен
+     * ATF, и затирать его биты своими — верный способ потерять
+     * прерывания, о которых мы пока ничего не знаем. */
+    ctlr = mmio_read32(GICD_BASE + GICD_CTLR);
+    mmio_write32(GICD_BASE + GICD_CTLR, ctlr | GICD_CTLR_ARE_NS | GICD_CTLR_ENGRP1NS);
+    dsb();
+
     kprintf("GIC      : GICv3, GICD %p, GICR %p\n",
-            (void *)(uintptr_t)GICD_BASE, (void *)(uintptr_t)gicr);
+            (void *)(uintptr_t)GICD_BASE, (void *)(uintptr_t)my_gicr());
     return 0;
 }
 
@@ -198,9 +222,10 @@ void gic_enable_irq(u32 intid, u32 prio, irq_handler_fn fn)
     handlers[intid] = fn;
 
     if (intid < GIC_SPI_BASE) {
-        /* SGI и PPI — хозяйство редистрибьютора нашего ядра */
-        mmio_write32(gicr + GICR_IPRIORITYR + intid, prio);
-        mmio_write32(gicr + GICR_ISENABLER0, bit);
+        /* SGI и PPI — хозяйство редистрибьютора нашего ядра.
+         * Поэтому таймерный PPI включает каждое ядро себе само. */
+        mmio_write32(my_gicr() + GICR_IPRIORITYR + intid, prio);
+        mmio_write32(my_gicr() + GICR_ISENABLER0, bit);
     } else {
         /* SPI: сначала группа и маршрут, только потом включение —
          * иначе прерывание может прийти раньше, чем решено, куда его слать. */
@@ -230,11 +255,13 @@ void gic_dispatch(void)
         if (intid >= INTID_SPURIOUS)
             return;
 
+        /* Счётчики общие для всех ядер, поэтому только атомарно:
+         * обычный ++ на восьми ядрах теряет часть прибавлений. */
         if (intid < GIC_MAX_IRQS && handlers[intid]) {
             handlers[intid](intid);
-            irq_count++;
+            atomic_inc(&irq_count);
         } else {
-            spurious_count++;
+            atomic_inc(&spurious_count);
         }
 
         /* EOI строго после обработчика: до него прерывание того же
@@ -243,5 +270,5 @@ void gic_dispatch(void)
     }
 }
 
-u64 gic_count(void)    { return irq_count; }
-u64 gic_spurious(void) { return spurious_count; }
+u64 gic_count(void)    { return atomic_read(&irq_count); }
+u64 gic_spurious(void) { return atomic_read(&spurious_count); }

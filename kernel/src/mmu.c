@@ -81,9 +81,20 @@ static void build_tables(void)
 
 int mmu_enable(void)
 {
-    u64 mair, tcr, sctlr, ips;
-
     build_tables();
+    return mmu_enable_cpu();
+}
+
+/*
+ * Включение MMU на ТЕКУЩЕМ ядре.
+ *
+ * Вынесено отдельно, потому что MAIR, TCR, TTBR0 и SCTLR — регистры
+ * процессора, а не системы: каждое проснувшееся ядро обязано настроить
+ * их себе само. Таблицы при этом общие, их строит только CPU0.
+ */
+int mmu_enable_cpu(void)
+{
+    u64 mair, tcr, sctlr, ips;
 
     /* Attr0 Device-nGnRnE, Attr1 Normal write-back, Attr2 Normal non-cacheable */
     mair = (0x00UL << (8 * ATTR_DEVICE)) |

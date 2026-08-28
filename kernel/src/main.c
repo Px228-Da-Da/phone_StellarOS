@@ -15,6 +15,9 @@
 #include "pmm.h"
 #include "kmalloc.h"
 #include "string.h"
+#include "smp.h"
+#include "sched.h"
+#include "spinlock.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -27,16 +30,34 @@
 #endif
 
 #define OS_NAME     "VELO-OS"
-#define OS_VERSION  "0.3"
+#define OS_VERSION  "0.4"
 
 /* Частота системного тика. 100 Гц — компромисс: достаточно часто, чтобы
  * планировщик на этапе 4 переключал задачи незаметно для глаза, и достаточно
  * редко, чтобы обработчик прерывания не съедал время сам на себя. */
 #define TIMER_HZ    100
 
-static void heartbeat(void);
+static void heartbeat_task(void *arg);
+static void heartbeat_polling(void);
 static int  irq_works(void);
 static void mem_selftest(void);
+static void worker_task(void *arg);
+
+/* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
+struct worker {
+    u32 index;
+    u32 cpu;                    /* на каком ядре отработала последний круг */
+    u64 rounds;
+};
+
+/* Задач намеренно больше, чем ядер даже у Helio G85: пока задач меньше,
+ * каждая просто сидит на своём ядре, и ни вытеснения, ни переездов
+ * между ядрами в дампе не увидеть — планировщику нечего решать. */
+static struct worker workers[10];
+static const char *worker_names[10] = {
+    "счёт-01", "счёт-02", "счёт-03", "счёт-04", "счёт-05",
+    "счёт-06", "счёт-07", "счёт-08", "счёт-09", "счёт-10",
+};
 
 /* Заголовок DTB: big-endian, магия 0xd00dfeed */
 struct fdt_header {
@@ -157,6 +178,11 @@ static void test_pattern(void)
 void kmain(u64 dtb_phys)
 {
     u64 slow, fast;
+    int irq_ok = 0;
+
+    /* Своя per-CPU запись до всего остального: this_cpu() понадобится
+     * и таймеру, и GIC, и планировщику. Загрузочное ядро всегда номер 0. */
+    percpu_init(0, read_mpidr());
 
     uart_init();
     banner();
@@ -213,14 +239,77 @@ void kmain(u64 dtb_phys)
      * маску DAIF.I. Снять её раньше — поймать прерывание без обработчика. */
     if (gic_init() == 0 && timer_init(TIMER_HZ) == 0) {
         irq_enable();
-        kprintf("IRQ      : РАЗРЕШЕНЫ\n");
-    } else {
-        kprintf("IRQ      : НЕДОСТУПНЫ, ОСТАЁМСЯ НА ОПРОСЕ СЧЁТЧИКА\n");
+        irq_ok = irq_works();
     }
 
-    kprintf("\nBOOT OK. HEARTBEAT:\n");
+    /*
+     * Без прерываний многозадачности не бывает: вытеснять задачу нечем,
+     * и первая же запущенная захватит ядро навсегда. В таком случае
+     * не делаем вид, что всё хорошо, а честно остаёмся одноядерными
+     * и печатаем пульс по опросу счётчика.
+     */
+    if (!irq_ok) {
+        kprintf("IRQ      : НЕ РАБОТАЮТ, ЗАДАЧИ НЕ ЗАПУСКАЮ\n");
+        kprintf("\nBOOT OK. HEARTBEAT:\n");
+        heartbeat_polling();
+    }
 
-    heartbeat();
+    kprintf("IRQ      : РАЗРЕШЕНЫ\n");
+
+    /* Многоядерность. Ядра будим только после того, как поднята вся
+     * общая инфраструктура: разбуженное ядро сразу пойдёт выделять память
+     * под свою idle-задачу и включать себе таймер. */
+    sched_init();
+    sched_init_cpu();
+    smp_start_secondaries();
+    smp_dump();
+
+    /* Задачи. Их подхватит любое свободное ядро — очередь одна на всех. */
+    for (u32 i = 0; i < ARRAY_SIZE(workers); i++) {
+        workers[i].index = i;
+        task_create(worker_names[i], worker_task, &workers[i]);
+    }
+    task_create("пульс", heartbeat_task, NULL);
+
+    kprintf("\nBOOT OK. ЗАДАЧИ ПОШЛИ:\n");
+
+    /* CPU0 дальше живёт как все: раздаёт себя очереди задач.
+     * Пульс теперь такая же задача, поэтому печать не зависит от того,
+     * на каком ядре она окажется. */
+    sched_idle_loop();
+}
+
+/* --- Демонстрационные задачи ---
+ *
+ * Каждая крутит один и тот же цикл и увеличивает два общих счётчика:
+ * один под спинлоком, второй — обычным ++. На одном ядре оба всегда
+ * совпадают, и разницу между ними невозможно ни увидеть, ни объяснить.
+ * На восьми ядрах незащищённый счётчик начинает терять прибавления
+ * прямо на глазах — это и есть самая наглядная причина, зачем нужны
+ * блокировки.
+ */
+static struct spinlock counter_lock = SPINLOCK_INIT("counter");
+static u64 counter_locked;
+static u64 counter_racy;
+
+static void worker_task(void *arg)
+{
+    struct worker *w = (struct worker *)arg;
+
+    for (;;) {
+        for (u32 i = 0; i < 1000; i++) {
+            u64 flags = spin_lock_irq(&counter_lock);
+
+            counter_locked++;
+            spin_unlock_irq(&counter_lock, flags);
+
+            /* А так делать нельзя — и ниже видно, почему */
+            counter_racy++;
+        }
+
+        w->rounds++;
+        w->cpu = cpu_id();
+    }
 }
 
 /* Проверка, что весь блок заполнен ожидаемым байтом */
@@ -391,35 +480,63 @@ static int irq_works(void)
  * в wfi и просыпается только по прерыванию таймера. Заодно это и проверка
  * всей цепочки: таймер -> GIC -> вектор -> обработчик -> EOI.
  */
-static void heartbeat(void)
+/* Мигание квадратом в углу — чтобы «живо» было видно и без текста */
+static void heartbeat_blink(u32 beat)
+{
+    if (fb_available())
+        fb_fill_rect(0, 0, 40, 40, (beat & 1) ? COLOR_GREEN : COLOR_BLACK);
+}
+
+/*
+ * Пульс как обычная задача.
+ *
+ * Раньше это был цикл в контексте загрузки, и на многоядерной системе он бы
+ * голодал: ядро, занятое бесконечной задачей, до печати уже не дошло бы.
+ * Задача же участвует в общей карусели наравне со всеми — и заодно служит
+ * доказательством, что планировщик действительно возвращает управление.
+ */
+static void heartbeat_task(void *arg)
 {
     u64 last_sec = 0;
-    int irq_alive = irq_works();
     u32 beat = 0;
 
-    if (!irq_alive)
-        kprintf("IRQ      : ТИКОВ НЕТ, ПЕРЕХОЖУ НА ОПРОС СЧЁТЧИКА\n");
+    (void)arg;
 
     for (;;) {
-        u64 sec;
+        u64 sec = timer_uptime_ms() / 1000;
 
-        if (irq_alive) {
-            wfi();
-            sec = timer_ticks() / TIMER_HZ;
-            if (sec == last_sec)
-                continue;               /* проснулись раньше следующей секунды */
-        } else {
-            delay_ms(1000);
-            sec = last_sec + 1;
+        if (sec == last_sec) {
+            wfi();          /* до ближайшего прерывания делать нечего */
+            continue;
         }
-
         last_sec = sec;
         beat++;
-        kprintf("TICK %lu  IRQ %lu  UPTIME %lu МС\n",
-                sec, gic_count(), timer_uptime_ms());
 
-        if (fb_available())
-            fb_fill_rect(0, 0, 40, 40, (beat & 1) ? COLOR_GREEN : COLOR_BLACK);
+        /* Потери печатаем абсолютным числом, а не процентом: доля выходит
+         * меньше процента и в целых числах всегда показывала бы ноль,
+         * то есть ровно скрывала бы то, ради чего счётчик и заведён. */
+        kprintf("TICK %lu  IRQ %lu  ЯДЕР %u  ЗАДАЧ %u  СЧЁТ %lu  ПОТЕРЯНО БЕЗ ЗАМКА %lu\n",
+                sec, gic_count(), cpu_online_count(), sched_task_count(),
+                counter_locked, counter_locked - counter_racy);
+
+        if (beat % 5 == 0)
+            sched_dump();
+
+        heartbeat_blink(beat);
+    }
+}
+
+/* Запасной пульс: прерываний нет, значит нет ни задач, ни сна — только опрос */
+static void heartbeat_polling(void)
+{
+    u32 beat = 0;
+
+    for (;;) {
+        delay_ms(1000);
+        beat++;
+        kprintf("TICK %u  UPTIME %lu МС (БЕЗ ПРЕРЫВАНИЙ)\n",
+                beat, timer_uptime_ms());
+        heartbeat_blink(beat);
     }
 }
 
@@ -448,4 +565,15 @@ void exception_fatal(u64 type, u64 esr, u64 elr, u64 far)
 void irq_handler(void)
 {
     gic_dispatch();
+
+    /*
+     * Вытеснение делается ЗДЕСЬ, а не внутри обработчика таймера: к этому
+     * моменту прерывание уже подтверждено и закрыто через EOI. Переключись
+     * мы раньше, незакрытое прерывание осталось бы активным на этом ядре
+     * и блокировало бы все следующие того же приоритета.
+     */
+    if (this_cpu()->resched) {
+        this_cpu()->resched = 0;
+        schedule();
+    }
 }

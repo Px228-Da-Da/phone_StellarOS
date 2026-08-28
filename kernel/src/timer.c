@@ -14,13 +14,18 @@
 #include "gic.h"
 #include "io.h"
 #include "print.h"
+#include "smp.h"
+#include "sched.h"
 
 #define CNTV_CTL_ENABLE     (1UL << 0)
 #define CNTV_CTL_IMASK      (1UL << 1)
 #define CNTV_CTL_ISTATUS    (1UL << 2)
 
+/* Интервал и частота общие: таймеры разных ядер идут от одного
+ * системного счётчика. А вот счётчик тиков у каждого ядра свой —
+ * он лежит в per-CPU структуре, потому что прерывание таймера
+ * приходит каждому ядру отдельно (это PPI). */
 static u64 interval;            /* тиков счётчика между прерываниями */
-static u64 ticks;
 static u64 start_count;
 static u32 timer_hz;
 
@@ -45,7 +50,11 @@ static void timer_irq(u32 intid)
     (void)intid;
 
     timer_write_tval(interval);
-    ticks++;
+    this_cpu()->ticks++;
+
+    /* Отсюда и берётся вытеснение: планировщик считает кванты
+     * по тем же тикам и решает, не пора ли сменить задачу. */
+    sched_tick();
 }
 
 int timer_init(u32 hz)
@@ -59,7 +68,6 @@ int timer_init(u32 hz)
 
     timer_hz    = hz;
     interval    = freq / hz;
-    ticks       = 0;
     start_count = read_cntvct();
 
     /* Сначала обработчик и разрешение в GIC, потом запуск самого таймера:
@@ -74,9 +82,28 @@ int timer_init(u32 hz)
     return 0;
 }
 
+/*
+ * Запуск таймера на разбуженном ядре.
+ *
+ * Интервал уже посчитан на CPU0, но включить таймер и разрешить себе PPI
+ * обязано каждое ядро само: регистры CNTV_* и редистрибьютор у него
+ * собственные. Без этого вторичное ядро не получит ни одного вытеснения
+ * и застрянет на первой же задаче навсегда.
+ */
+int timer_init_cpu(void)
+{
+    if (!interval)
+        return -1;
+
+    gic_enable_irq(TIMER_IRQ_VIRT, GIC_PRIO_DEFAULT, timer_irq);
+    timer_write_tval(interval);
+    timer_write_ctl(CNTV_CTL_ENABLE);
+    return 0;
+}
+
 u64 timer_ticks(void)
 {
-    return ticks;
+    return this_cpu()->ticks;
 }
 
 u64 timer_uptime_ms(void)

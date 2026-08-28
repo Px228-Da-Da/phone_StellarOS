@@ -67,7 +67,9 @@ $(BUILD)/Image: $(BUILD)/kernel.elf
 
 # gic-version=3 обязателен: в merlin стоит GIC-500 (v3), и мы хотим отлаживать
 # в эмуляторе ровно тот код, который поедет на телефон.
-QEMU := qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a53 -m 1G -nographic
+# -smp 8 — столько же ядер, сколько у Helio G85: планировщик и PSCI
+# проверяются в тех же условиях, что и на телефоне.
+QEMU := qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a53 -smp 8 -m 1G -nographic
 
 run: BOARD := qemu
 run: $(BUILD)/Image

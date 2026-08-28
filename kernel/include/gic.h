@@ -29,8 +29,11 @@
 
 typedef void (*irq_handler_fn)(u32 intid);
 
-/* Поднять CPU-интерфейс и редистрибьютор текущего ядра */
+/* CPU0: интерфейс своего ядра плюс общий дистрибьютор */
 int  gic_init(void);
+
+/* Любое ядро: только своё — регистры ICC_* и свой редистрибьютор */
+int  gic_init_cpu(void);
 
 /* Разрешить прерывание и назначить ему обработчик */
 void gic_enable_irq(u32 intid, u32 prio, irq_handler_fn fn);
