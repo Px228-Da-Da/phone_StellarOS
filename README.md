@@ -94,6 +94,7 @@ kernel/src/uart.c      PL011 (QEMU) и MTK 8250 (телефон)
 kernel/src/print.c     kprintf — печатает сразу и в UART, и на экран
 kernel/src/soc/        карты регистров MT6768 и QEMU virt
 tools/                 setup, упаковка boot.img, прошивка и откат
+tools/fdt-test/        прогон парсера device tree на ПК: тот же fdt.c, обычный gcc
 docs/                  устройство, безопасность, разблокировка, цепочка загрузки
 ```
 

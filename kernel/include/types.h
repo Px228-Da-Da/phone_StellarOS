@@ -12,7 +12,9 @@ typedef signed long         s64;
 typedef unsigned long       size_t;
 typedef unsigned long       uintptr_t;
 
+#ifndef NULL
 #define NULL ((void *)0)
+#endif
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 #endif
