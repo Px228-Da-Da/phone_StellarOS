@@ -65,6 +65,24 @@ int fdt_node_reg(u64 dtb_phys, const char *node_name, u32 index,
 int fdt_compatible_reg(u64 dtb_phys, const char *compat, u32 index,
                        struct fdt_region *out);
 
+/*
+ * Прочитать index-е прерывание узла с данным compatible и перевести его
+ * в номер INTID, каким его знает GIC.
+ *
+ * В дереве прерывание записано тройкой ячеек <тип номер флаги>. Тип 0 —
+ * это SPI (устройства), и настоящий INTID у него номер + 32; тип 1 — PPI
+ * (приватные для ядра, среди них таймеры), INTID = номер + 16. Драйвер
+ * не должен знать про это смещение — fdt_interrupt возвращает уже готовый
+ * INTID, который можно отдать в gic_enable_irq.
+ *
+ * Пример: у узла arm,armv8-timer четыре прерывания, третье (index 2) —
+ * виртуальный таймер; на нашем железе это выходит INTID 27.
+ */
+#define FDT_IRQ_SPI  0
+#define FDT_IRQ_PPI  1
+
+int fdt_interrupt(u64 dtb_phys, const char *compat, u32 index, u32 *intid_out);
+
 /* Запомнить дерево, переданное загрузчиком, чтобы не таскать адрес всюду */
 void fdt_set_root(u64 dtb_phys);
 u64  fdt_root(void);

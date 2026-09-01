@@ -504,6 +504,70 @@ int fdt_compatible_reg(u64 dtb_phys, const char *compat, u32 index,
     return -1;
 }
 
+/*
+ * Прочитать index-е прерывание узла, найденного по compatible.
+ *
+ * Устроено как fdt_compatible_reg, только берётся свойство interrupts,
+ * а не reg. Ширина одного прерывания — три ячейки: <тип номер флаги>.
+ * Поддерживаем именно 3 ячейки: столько у GICv3 (#interrupt-cells = 3),
+ * а другого контроллера у нас нет.
+ */
+int fdt_interrupt(u64 dtb_phys, const char *compat, u32 index, u32 *intid_out)
+{
+    struct fdt_iter it;
+    struct fdt_event ev;
+    u32 node_depth = 0;
+    int matched = 0;
+    const u8 *irq = NULL;
+    u32 irq_len = 0;
+
+    if (fdt_iter_init(dtb_phys, &it) != 0)
+        return -1;
+
+    while (fdt_next(&it, &ev) == 0) {
+        if (ev.kind == FDT_EV_NODE && (!matched || ev.depth <= node_depth)) {
+            matched = 0;
+            irq = NULL;
+            irq_len = 0;
+            node_depth = ev.depth;
+        }
+
+        if (ev.kind == FDT_EV_PROP && ev.depth == node_depth) {
+            if (str_eq(ev.name, "compatible") && compat_has(ev.data, ev.len, compat))
+                matched = 1;
+            else if (str_eq(ev.name, "interrupts")) {
+                irq = ev.data;
+                irq_len = ev.len;
+            }
+        }
+
+        if (ev.kind == FDT_EV_END_NODE && matched && ev.depth == node_depth) {
+            const u32 cells = 3;                /* <тип номер флаги> */
+            u32 stride = cells * 4;
+            u32 off = index * stride;
+            u32 type, num;
+
+            if (!irq || off + stride > irq_len)
+                return -1;
+
+            type = be32p(irq + off);
+            num  = be32p(irq + off + 4);
+
+            /* Перевод в INTID: PPI живут с 16, SPI — с 32 */
+            if (type == FDT_IRQ_PPI)
+                *intid_out = 16 + num;
+            else if (type == FDT_IRQ_SPI)
+                *intid_out = 32 + num;
+            else
+                return -1;
+
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 /* Адрес дерева, переданный загрузчиком. Держим его здесь, чтобы драйверам
  * не приходилось получать его через полдесятка параметров. */
 static u64 root_dtb;

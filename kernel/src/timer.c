@@ -16,6 +16,7 @@
 #include "print.h"
 #include "smp.h"
 #include "sched.h"
+#include "fdt.h"
 
 #define CNTV_CTL_ENABLE     (1UL << 0)
 #define CNTV_CTL_IMASK      (1UL << 1)
@@ -28,6 +29,7 @@
 static u64 interval;            /* тиков счётчика между прерываниями */
 static u64 start_count;
 static u32 timer_hz;
+static u32 timer_ppi = TIMER_IRQ_VIRT;  /* номер уточняется из дерева */
 
 static void timer_write_tval(u64 v)
 {
@@ -70,15 +72,36 @@ int timer_init(u32 hz)
     interval    = freq / hz;
     start_count = read_cntvct();
 
+    /*
+     * Номер прерывания берём из дерева, а не из константы. У arm,armv8-timer
+     * четыре прерывания, третье (index 2) — виртуальный таймер, тот самый,
+     * что мы используем. Константа TIMER_IRQ_VIRT остаётся запасной на случай,
+     * если дерева нет или узел не нашёлся.
+     *
+     * Пока и там, и там выходит 27 — но это должно быть прочитано, а не
+     * совпасть по случайности: на другом железе номер вправе отличаться.
+     */
+    int from_dtb = 0;
+
+    if (fdt_root()) {
+        u32 intid;
+
+        if (fdt_interrupt(fdt_root(), "arm,armv8-timer", 2, &intid) == 0) {
+            timer_ppi = intid;
+            from_dtb = 1;
+        }
+    }
+
     /* Сначала обработчик и разрешение в GIC, потом запуск самого таймера:
      * иначе первое же прерывание прилетит в пустоту и станет «ничьим». */
-    gic_enable_irq(TIMER_IRQ_VIRT, GIC_PRIO_DEFAULT, timer_irq);
+    gic_enable_irq(timer_ppi, GIC_PRIO_DEFAULT, timer_irq);
 
     timer_write_tval(interval);
     timer_write_ctl(CNTV_CTL_ENABLE);   /* IMASK=0: маску снимаем */
 
-    kprintf("TIMER    : %u ГЦ, ИНТЕРВАЛ %lu ТИКОВ, PPI %u\n",
-            hz, interval, TIMER_IRQ_VIRT);
+    kprintf("TIMER    : %u ГЦ, ИНТЕРВАЛ %lu ТИКОВ, PPI %u (%s)\n",
+            hz, interval, timer_ppi,
+            from_dtb ? "ИЗ DTB" : "КОНСТАНТА");
     return 0;
 }
 
@@ -95,7 +118,7 @@ int timer_init_cpu(void)
     if (!interval)
         return -1;
 
-    gic_enable_irq(TIMER_IRQ_VIRT, GIC_PRIO_DEFAULT, timer_irq);
+    gic_enable_irq(timer_ppi, GIC_PRIO_DEFAULT, timer_irq);
     timer_write_tval(interval);
     timer_write_ctl(CNTV_CTL_ENABLE);
     return 0;
