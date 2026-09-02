@@ -89,7 +89,7 @@ wsl -u root bash -c 'cd /mnt/d/OS_ANDROID/kernel && make screenshot'
 ```powershell
 & "C:\Program Files\qemu\qemu-system-aarch64.exe" -M virt,gic-version=3 `
     -cpu cortex-a53 -smp 8 -m 1G -device ramfb -serial stdio `
-    -kernel D:\OS_ANDROID\kerneluild\qemu\Image
+    -kernel D:\OS_ANDROID\kernel\build\qemu\Image
 ```
 
 Ctrl+A затем X — выйти (в варианте с `-serial stdio` просто закрыть окно).
