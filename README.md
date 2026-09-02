@@ -70,6 +70,30 @@ wsl -u root bash -c 'cd /mnt/d/OS_ANDROID/kernel && make BOARD=qemu && make run'
 wsl -u root bash -c 'cd /mnt/d/OS_ANDROID/kernel && make run-phone'
 ```
 
+## Как посмотреть экран
+
+Ядро рисует свой экран само — шрифт, консоль, вывод пикселей. В QEMU это
+включается устройством `ramfb`, которое показывает наш же буфер памяти
+как дисплей (то же самое, что делает загрузчик на телефоне).
+
+```bash
+# окно с экраном прямо из WSL (через WSLg)
+wsl -u root bash -c 'cd /mnt/d/OS_ANDROID/kernel && make run-screen'
+
+# или снимок в PNG, если окно не открывается
+wsl -u root bash -c 'cd /mnt/d/OS_ANDROID/kernel && make screenshot'
+```
+
+Если WSLg недоступен, есть Windows-сборка QEMU — окно откроется нативно:
+
+```powershell
+& "C:\Program Files\qemu\qemu-system-aarch64.exe" -M virt,gic-version=3 `
+    -cpu cortex-a53 -smp 8 -m 1G -device ramfb -serial stdio `
+    -kernel D:\OS_ANDROID\kerneluild\qemu\Image
+```
+
+Ctrl+A затем X — выйти (в варианте с `-serial stdio` просто закрыть окно).
+
 Ctrl+A затем X — выйти из QEMU.
 
 ## Структура

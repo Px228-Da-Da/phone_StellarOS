@@ -88,6 +88,23 @@ run:
 	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
 	$(QEMU_BASE) -cpu cortex-a53 -smp 8 -m 1G -kernel build/qemu/Image
 
+# То же самое, но с окном: ядро рисует свой экран через ramfb.
+#
+# -device ramfb   даёт ядру дисплей (см. src/ramfb.c)
+# -serial stdio   лог по-прежнему в терминал, чтобы видеть оба канала сразу
+#
+# В WSL окно открывается через WSLg. Если его нет, есть два пути:
+#   make screenshot            — снять кадр в PNG, без всякого окна
+#   запустить Windows-сборку QEMU (см. README, «Как посмотреть экран»)
+run-screen:
+	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
+	qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a53 -smp 8 -m 1G 	    -device ramfb -serial stdio -kernel build/qemu/Image
+
+# Снимок экрана в PNG — работает где угодно, окно не нужно
+screenshot:
+	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
+	@cd .. && python3 tools/screenshot.py 3.5 kernel/build/velo-screen.png
+
 # Конфигурация, максимально близкая к Redmi Note 9:
 #   cortex-a55 — малые ядра Helio G85; большие A75 QEMU не эмулирует,
 #                но набор инструкций у них общий
@@ -113,4 +130,4 @@ clean:
 # Зависимости от заголовков, записанные компилятором
 -include $(OBJS:.o=.d)
 
-.PHONY: all run run-phone debug clean
+.PHONY: all run run-screen run-phone screenshot debug clean
