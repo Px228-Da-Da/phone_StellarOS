@@ -277,7 +277,8 @@ void gic_enable_irq(u32 intid, u32 prio, irq_handler_fn fn)
     if (intid < GIC_SPI_BASE) {
         /* SGI и PPI — хозяйство редистрибьютора нашего ядра.
          * Поэтому таймерный PPI включает каждое ядро себе само. */
-        mmio_write32(my_gicr() + GICR_IPRIORITYR + intid, prio);
+        /* Приоритет - ровно один байт: массив IPRIORITYR байтовый */
+        mmio_write8(my_gicr() + GICR_IPRIORITYR + intid, (u8)prio);
         mmio_write32(my_gicr() + GICR_ISENABLER0, bit);
     } else {
         /* SPI: сначала группа и маршрут, только потом включение —
@@ -285,7 +286,7 @@ void gic_enable_irq(u32 intid, u32 prio, irq_handler_fn fn)
         u32 g = mmio_read32(gicd_base + GICD_IGROUPR + reg * 4);
 
         mmio_write32(gicd_base + GICD_IGROUPR + reg * 4, g | bit);
-        mmio_write32(gicd_base + GICD_IPRIORITYR + intid, prio);
+        mmio_write8(gicd_base + GICD_IPRIORITYR + intid, (u8)prio);
         /* Маршрут: конкретному ядру, тому самому, где сейчас исполняемся */
         mmio_write64(gicd_base + GICD_IROUTER + intid * 8,
                      read_mpidr() & 0xFF00FFFFFFUL);

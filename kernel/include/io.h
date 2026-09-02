@@ -8,6 +8,23 @@
  * а барьеры не дают процессору переупорядочить обращения к MMIO.
  */
 
+/*
+ * Байтовый доступ. Нужен там, где регистр — массив байтов, а не слов:
+ * например, приоритеты прерываний в GIC (по байту на прерывание).
+ * Обратиться туда 32-битной записью нельзя: смещение обычно не кратно
+ * четырём, а невыровненный доступ к Device-памяти на ARM — это исключение,
+ * а не «медленнее».
+ */
+static inline void mmio_write8(uintptr_t addr, u8 val)
+{
+    *(volatile u8 *)addr = val;
+}
+
+static inline u8 mmio_read8(uintptr_t addr)
+{
+    return *(volatile u8 *)addr;
+}
+
 static inline void mmio_write32(uintptr_t addr, u32 val)
 {
     *(volatile u32 *)addr = val;
