@@ -17,6 +17,10 @@
 
 #define QEMU_UART0_BASE     0x09000000UL    /* PL011                     */
 
+/* fw_cfg — через него QEMU отдаёт гостю свои «файлы»; нам нужен etc/ramfb,
+ * чтобы получить экран (см. src/ramfb.c) */
+#define QEMU_FWCFG_BASE     0x09020000UL
+
 /* Контроллер прерываний.
  * ВАЖНО: запускать QEMU нужно с -M virt,gic-version=3 (см. Makefile).
  * По умолчанию virt даёт GICv2, а в merlin стоит GIC-500, то есть v3.

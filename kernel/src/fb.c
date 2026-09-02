@@ -14,10 +14,19 @@
 #include "io.h"
 
 extern const u8 font8x8[64][8];
+extern const u8 font_cyr[33][8];
 
-#define GLYPH_SCALE   3                 /* 8x8 -> 24x24, читаемо на 1080p */
-#define GLYPH_W       (8 * GLYPH_SCALE)
-#define GLYPH_H       (8 * GLYPH_SCALE)
+/*
+ * Масштаб глифа подбираем под ширину экрана, а не задаём числом.
+ *
+ * Смысл в том, чтобы в строку влезало примерно одинаковое число символов
+ * на любом экране: на 1080 пикселях телефона это множитель 3, на 720
+ * в эмуляторе — 2, и там, и там выходит около 45 знаков. Иначе отладка
+ * шла бы на одной плотности текста, а телефон показывал бы другую,
+ * и все переносы строк пришлось бы проверять заново.
+ */
+#define GLYPH_W       (8 * fb.scale)
+#define GLYPH_H       (8 * fb.scale)
 #define MARGIN        8
 
 static struct {
@@ -26,6 +35,7 @@ static struct {
     u32 stride_px;                      /* пикселей в строке (может быть > width) */
     u32 fg, bg;
     u32 cur_x, cur_y;                   /* курсор консоли в пикселях */
+    u32 scale;                          /* во сколько раз растянут глиф 8x8 */
     int ready;
 } fb;
 
@@ -65,11 +75,38 @@ static int fb_probe(void)
     return 0;
 }
 #else
-/* QEMU -M virt экрана не имеет: консоль уходит только в UART.
- * Так и задумано — на этапе отладки логики графика не нужна. */
+#include "ramfb.h"
+
+/*
+ * QEMU -M virt своего экрана не имеет, но умеет ramfb: берёт буфер
+ * из нашей же памяти и показывает его как дисплей. Для нас это ровно
+ * та же схема, что на телефоне — линейный массив пикселей в DRAM, —
+ * поэтому весь код ниже (шрифт, консоль, прокрутка) одинаков для обоих.
+ *
+ * Размер взят портретный, как у merlin: пусть окно эмулятора выглядит
+ * телефоном, а расчёты строк и переносов проверяются на тех же пропорциях.
+ *
+ * Буфер лежит в .bss, а не выделяется через pmm, по простой причине:
+ * экран поднимается ДО аллокатора — иначе первые же сообщения о памяти
+ * было бы некуда выводить. Заодно он автоматически попадает в область
+ * образа, которую pmm и так помечает занятой.
+ */
+#define QEMU_FB_W   720
+#define QEMU_FB_H   1280
+
+static u32 qemu_fb[QEMU_FB_W * QEMU_FB_H] __attribute__((aligned(4096)));
+
 static int fb_probe(void)
 {
-    return -1;
+    if (ramfb_setup((u64)(uintptr_t)qemu_fb, QEMU_FB_W, QEMU_FB_H,
+                    QEMU_FB_W * 4) != 0)
+        return -1;                  /* запущено без -device ramfb */
+
+    fb.base      = qemu_fb;
+    fb.width     = QEMU_FB_W;
+    fb.height    = QEMU_FB_H;
+    fb.stride_px = QEMU_FB_W;
+    return 0;
 }
 #endif
 
@@ -83,6 +120,11 @@ int fb_init(void)
 
     if (fb_probe() != 0)
         return -1;
+
+    /* Около 45 знаков в строке при любой ширине */
+    fb.scale = fb.width / (45 * 8);
+    if (fb.scale < 1)
+        fb.scale = 1;
 
     fb.ready = 1;
     return 0;
@@ -131,44 +173,110 @@ void fb_fill_rect(u32 x0, u32 y0, u32 w, u32 h, u32 color)
     dsb();
 }
 
-static void draw_glyph(char c, u32 px, u32 py)
+/*
+ * Найти глиф по кодовой точке.
+ *
+ * Латиница лежит подряд с 0x20, кириллица — отдельной таблицей: в юникоде
+ * А..Я идут с 0x410, а Ё выбивается из алфавитного порядка и стоит на 0x401,
+ * поэтому у неё отдельная запись в конце таблицы.
+ *
+ * Строчные приводим к прописным: рисовать два начертания в шрифте 8x8
+ * негде, а читаемость от этого не страдает.
+ */
+static const u8 *glyph_for(u32 cp)
 {
-    u8 idx;
+    if (cp >= 'a' && cp <= 'z')
+        cp -= 32;
+    if (cp >= 0x20 && cp <= 0x5F)
+        return font8x8[cp - 0x20];
 
-    if (c >= 'a' && c <= 'z')           /* строчных в шрифте нет */
-        c -= 32;
-    if (c < 0x20 || c > 0x5F)
-        c = '?';
-    idx = (u8)c - 0x20;
+    if (cp >= 0x430 && cp <= 0x44F)     /* а..я -> А..Я */
+        cp -= 0x20;
+    if (cp >= 0x410 && cp <= 0x42F)
+        return font_cyr[cp - 0x410];
+
+    if (cp == 0x401 || cp == 0x451)     /* Ё и ё */
+        return font_cyr[32];
+
+    return font8x8['?' - 0x20];
+}
+
+static void draw_glyph(u32 cp, u32 px, u32 py)
+{
+    const u8 *glyph = glyph_for(cp);
 
     for (u32 row = 0; row < 8; row++) {
-        u8 bits = font8x8[idx][row];
+        u8 bits = glyph[row];
         for (u32 col = 0; col < 8; col++) {
             u32 color = (bits & (0x80 >> col)) ? fb.fg : fb.bg;
-            /* масштабируем пиксель шрифта в квадрат GLYPH_SCALE x GLYPH_SCALE */
-            for (u32 sy = 0; sy < GLYPH_SCALE; sy++) {
-                u32 y = py + row * GLYPH_SCALE + sy;
+            /* пиксель шрифта растягиваем в квадрат scale x scale */
+            for (u32 sy = 0; sy < fb.scale; sy++) {
+                u32 y = py + row * fb.scale + sy;
                 if (y >= fb.height)
                     return;
                 volatile u32 *p = fb.base + (u64)y * fb.stride_px
-                                + px + col * GLYPH_SCALE;
-                for (u32 sx = 0; sx < GLYPH_SCALE; sx++)
+                                + px + col * fb.scale;
+                for (u32 sx = 0; sx < fb.scale; sx++)
                     p[sx] = color;
             }
         }
     }
 }
 
+/*
+ * Вывод символа.
+ *
+ * На вход приходят БАЙТЫ, а текст ядра в UTF-8, где кириллица занимает два
+ * байта. Поэтому здесь маленький автомат: увидев ведущий байт, запоминаем
+ * его и ждём второй, и только собрав кодовую точку целиком, рисуем глиф
+ * и двигаем курсор. Иначе каждая русская буква съедала бы две позиции
+ * и печаталась как два мусорных знака.
+ *
+ * Поддержаны двухбайтовые последовательности (0xC0..0xDF) — этого хватает
+ * на всю кириллицу; более длинные пропускаем, чтобы автомат не залипал.
+ */
+static void fb_putcp(u32 cp);
+
 void fb_putc(char c)
 {
+    static u8 lead;
+    u8 b = (u8)c;
+
     if (!fb.ready)
         return;
 
-    if (c == '\r') {
+    if (lead) {
+        u8 saved = lead;
+
+        lead = 0;
+        if ((b & 0xC0) == 0x80) {
+            fb_putcp(((u32)(saved & 0x1F) << 6) | (b & 0x3F));
+            return;
+        }
+        /* Оборванная последовательность: продолжаем разбирать байт как есть */
+    }
+
+    if (b >= 0xC0 && b <= 0xDF) {
+        lead = b;
+        return;
+    }
+    if (b >= 0xE0) {
+        /* Трёх- и четырёхбайтовые нам взять неоткуда — их в тексте ядра нет */
+        return;
+    }
+
+    fb_putcp(b);
+}
+
+static void fb_putcp(u32 cp)
+{
+    /* Работаем именно с кодовой точкой, а не с char: кириллица начинается
+     * с 0x410, и сужение до восьми бит превращало Я (0x42F) в '/' (0x2F). */
+    if (cp == '\r') {
         fb.cur_x = MARGIN;
         return;
     }
-    if (c == '\n') {
+    if (cp == '\n') {
         fb.cur_x = MARGIN;
         fb.cur_y += GLYPH_H;
         goto wrap;
@@ -187,10 +295,10 @@ wrap:
         fb_clear(fb.bg);
         fb.fg = saved_fg;
     }
-    if (c == '\n')
+    if (cp == '\n')
         return;
 
-    draw_glyph(c, fb.cur_x, fb.cur_y);
+    draw_glyph(cp, fb.cur_x, fb.cur_y);
     fb.cur_x += GLYPH_W;
     dsb();
 }
