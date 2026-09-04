@@ -4,3 +4,5 @@ prebuilt/backup/
 *.bin
 *.o
 *.elf
+out/
+unpacked/
