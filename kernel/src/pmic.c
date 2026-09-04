@@ -23,34 +23,104 @@
 
 #define PWRAP_BASE          0x1000D000UL
 
-/* Состояние конечного автомата лежит в битах 18..16 ответа */
-#define PWRAP_FSM(x)        (((x) >> 16) & 0x7)
-#define FSM_IDLE            0x00
-#define FSM_WFVLDCLR        0x06        /* ответ готов, ждём подтверждения */
+/*
+ * Раскладка снята с живого устройства дампом всего блока.
+ *
+ * Регистры идут группами по 0x10 — это четыре независимых канала связи
+ * с PMIC, у каждого своя тройка «команда / ответ / подтверждение».
+ * Загрузчик пользуется третьим (0xC20): там осталась его последняя
+ * команда 0x02DD0000 и ответ 0x80F00800.
+ *
+ * Готовность отмечается СТАРШИМ БИТОМ ответа, а не полем состояния
+ * автомата, как я предполагал сначала. Именно поэтому перебор смещений
+ * ничего не находил: он ждал признака, которого здесь нет.
+ */
+#define PWRAP_WACS2_CMD     0xC20
+#define PWRAP_WACS2_RDATA   0xC24
+#define PWRAP_WACS2_VLDCLR  0xC28
+
+#define PWRAP_VALID         (1U << 31)  /* ответ готов */
 
 static u32 pwrap_spins = 200000;
 
 void pmic_set_spins(u32 n) { pwrap_spins = n; }
 
+/* Смещения оставлены переменными: пригодилось при поиске раскладки,
+ * и пусть остаются — вдруг у другого экземпляра канал окажется иным. */
+static u32 reg_cmd    = PWRAP_WACS2_CMD;
+static u32 reg_rdata  = PWRAP_WACS2_RDATA;
+static u32 reg_vldclr = PWRAP_WACS2_VLDCLR;
+
+void pmic_use_regs(u32 cmd, u32 rdata, u32 vldclr)
+{
+    reg_cmd = cmd;
+    reg_rdata = rdata;
+    reg_vldclr = vldclr;
+}
+
+int pmic_read(u32 reg, u16 *out)
+{
+    u64 wait;
+
+    /*
+     * Ответ забираем не сразу, а выждав паузу.
+     *
+     * Сначала я ждал признака готовности в старшем бите ответа — и попался:
+     * этот бит стоит всегда, очистка его не сбрасывает, поэтому чтение
+     * происходило мгновенно и возвращало результат ПРЕДЫДУЩЕЙ команды.
+     * Опознали по характерному признаку: каждый ответ отставал ровно на
+     * один запрос, и вместо идентификатора PMIC приходил остаток команды
+     * загрузчика.
+     *
+     * Обмен по шине PMIC занимает единицы микросекунд; ждём пятьдесят —
+     * с запасом, но всё ещё незаметно.
+     */
+    mmio_write32(PWRAP_BASE + reg_vldclr, 1);
+    dsb();
+
+    /* Старший бит нулевой — это чтение. Адрес делится пополам: шина
+     * адресует шестнадцатибитные слова, а не байты. */
+    mmio_write32(PWRAP_BASE + reg_cmd, (reg >> 1) << 16);
+    dsb();
+
+    wait = read_cntpct() + read_cntfrq() / 20000;    /* 50 мкс */
+    while (read_cntpct() < wait)
+        ;
+
+    if (out)
+        *out = (u16)(mmio_read32(PWRAP_BASE + reg_rdata) & 0xFFFF);
+
+    mmio_write32(PWRAP_BASE + reg_vldclr, 1);
+    dsb();
+    return 0;
+}
+
+int pmic_write(u32 reg, u16 val)
+{
+    u64 wait;
+
+    mmio_write32(PWRAP_BASE + reg_vldclr, 1);
+    dsb();
+    /* Старший бит единица — это запись */
+    mmio_write32(PWRAP_BASE + reg_cmd, (1U << 31) | ((reg >> 1) << 16) | val);
+    dsb();
+
+    /* Даём посылке уйти по шине, иначе следующая команда затрёт эту */
+    wait = read_cntpct() + read_cntfrq() / 20000;
+    while (read_cntpct() < wait)
+        ;
+    return 0;
+}
+
 /*
- * Найти смещения регистров перебором.
- *
- * Гадать по драйверу Linux оказалось бесполезно: у MT6768 раскладка не
- * совпала ни с одним из двух ожидаемых вариантов. Но блок PWRAP занимает
- * всего 4 КБ, то есть 1024 варианта по четыре байта — их можно просто
- * перебрать и спросить у PMIC его идентификатор. Настоящие регистры
- * ответят, пустые промолчат.
- *
- * Тройка регистров идёт подряд (команда, ответ, подтверждение) во всех
- * поколениях, поэтому перебираем только начало тройки.
- *
- * Возвращает найденное смещение команды или 0 при неудаче.
+ * Поиск канала перебором остаётся про запас: раскладку мы теперь знаем,
+ * но если у другого экземпляра канал окажется иным, перебор её найдёт.
  */
 u32 pmic_find_regs(u16 *id_out)
 {
     u32 saved = pwrap_spins;
 
-    pwrap_spins = 4000;                 /* при переборе ждать долго незачем */
+    pwrap_spins = 4000;
     for (u32 off = 0; off + 8 < 0x1000; off += 4) {
         u16 id = 0;
 
@@ -62,65 +132,8 @@ u32 pmic_find_regs(u16 *id_out)
             return off;
         }
     }
+    pmic_use_regs(PWRAP_WACS2_CMD, PWRAP_WACS2_RDATA, PWRAP_WACS2_VLDCLR);
     pwrap_spins = saved;
-    return 0;
-}
-
-
-/* Поколение mt6765/mt6768 — значение по умолчанию */
-static u32 reg_cmd    = 0xC80;
-static u32 reg_rdata  = 0xC84;
-static u32 reg_vldclr = 0xC88;
-
-void pmic_use_regs(u32 cmd, u32 rdata, u32 vldclr)
-{
-    reg_cmd = cmd;
-    reg_rdata = rdata;
-    reg_vldclr = vldclr;
-}
-
-static int wait_fsm(u32 want)
-{
-    for (u32 i = 0; i < pwrap_spins; i++) {
-        if (PWRAP_FSM(mmio_read32(PWRAP_BASE + reg_rdata)) == want)
-            return 0;
-    }
-    return -1;
-}
-
-int pmic_read(u32 reg, u16 *out)
-{
-    u32 r;
-
-    if (wait_fsm(FSM_IDLE) != 0)
-        return -1;                      /* обёртка не в исходном состоянии */
-
-    /* Старший бит нулевой — это чтение */
-    mmio_write32(PWRAP_BASE + reg_cmd, (reg >> 1) << 16);
-    dsb();
-
-    if (wait_fsm(FSM_WFVLDCLR) != 0)
-        return -2;                      /* ответа не дождались */
-
-    r = mmio_read32(PWRAP_BASE + reg_rdata);
-    if (out)
-        *out = (u16)(r & 0xFFFF);
-
-    /* Подтверждаем приём, иначе следующая команда не пойдёт */
-    mmio_write32(PWRAP_BASE + reg_vldclr, 1);
-    dsb();
-    return 0;
-}
-
-int pmic_write(u32 reg, u16 val)
-{
-    if (wait_fsm(FSM_IDLE) != 0)
-        return -1;
-
-    /* Старший бит единица — это запись */
-    mmio_write32(PWRAP_BASE + reg_cmd,
-                 (1U << 31) | ((reg >> 1) << 16) | val);
-    dsb();
     return 0;
 }
 

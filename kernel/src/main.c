@@ -163,6 +163,7 @@ static void i2c0_scan(void);
 static void gpio_check(void);
 static void touch_wake(void);
 static void pmic_probe(void);
+static void touch_power_on(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -409,70 +410,100 @@ static void test_pattern(void)
  * Идентификатор выбран намеренно: это чтение, оно ничего не меняет, а
  * значение заведомо не ноль и не 0xFFFF — спутать с мусором нельзя.
  */
-static void pmic_probe(void)
+/*
+ * Включить питание тачскрина и разбудить его.
+ *
+ * Питание идёт от регулятора VLDO28 внутри PMIC — это выяснилось из
+ * свойства vtouch-supply в дереве устройства. Загрузчик его не поднимает:
+ * панель светится от другой линии, а тач ему не нужен.
+ *
+ * Это первая наша ЗАПИСЬ в PMIC. Делаем её узко: читаем регистр, ставим
+ * один бит включения, пишем обратно. Никаких других полей не трогаем —
+ * в PMIC соседние биты управляют питанием памяти и самого процессора.
+ */
+static void touch_power_on(void)
 {
 #if defined(BOARD_MERLIN)
-    u16 id = 0, con0 = 0;
-    u32 off;
+    u16 con0 = 0;
 
-    kprintf("PWRAP: ИЩУ РЕГИСТРЫ ПЕРЕБОРОМ...\n");
-    off = pmic_find_regs(&id);
+    if (pmic_read(MT6358_LDO_VLDO28_CON0, &con0) != 0) {
+        kprintf("PMIC: ЧТЕНИЕ НЕ ВЫШЛО\n");
+        return;
+    }
+    kprintf("VLDO28: БЫЛО %x (%s)\n", con0,
+            (con0 & 1) ? "ВКЛ" : "ВЫКЛ");
 
-    if (!off) {
-        kprintf("PWRAP: НЕ НАШЁЛ НИ ОДНОГО\n");
-        {
-            /* Самое простое объяснение — блок не затактирован: тогда все его
-             * регистры читаются нулями, и перебор обречён по определению.
-             * Проверяем прямо, а заодно сверяемся с заведомо живым GPIO:
-             * если и там ноль, значит дело не в тактировании, а в доступе
-             * к памяти вообще. */
-            u32 nz = 0, first_off = 0, first_val = 0;
+    if (!(con0 & 1)) {
+        pmic_write(MT6358_LDO_VLDO28_CON0, (u16)(con0 | 1));
+        delay_ms(5);                    /* регулятору нужно время выйти */
+        pmic_read(MT6358_LDO_VLDO28_CON0, &con0);
+        kprintf("VLDO28: СТАЛО %x (%s)\n", con0,
+                (con0 & 1) ? "ВКЛ" : "ВЫКЛ");
+    }
 
-            for (u32 o = 0; o < 0x1000; o += 4) {
-                u32 v = mmio_read32(0x1000D000UL + o);
-
-                if (v) {
-                    if (!nz) { first_off = o; first_val = v; }
-                    nz++;
-                }
-            }
-            kprintf("PWRAP: НЕНУЛЕВЫХ %u ИЗ 1024\n", nz);
-            if (nz)
-                kprintf("PWRAP: ПЕРВОЕ +%x = %x\n", first_off, first_val);
-            kprintf("СВЕРКА GPIO +0 = %x (ДОЛЖНО БЫТЬ НЕ 0)\n",
-                    mmio_read32(MT_GPIO_BASE));
-            /* Где именно в блоке живут регистры. Печатаем по одному
-             * числу на каждые 256 байт: полный дамп с экрана не прочитать,
-             * а карта распределения сразу покажет, в каком углу искать. */
-            kprintf("КАРТА ПО 256Б:\n");
-            for (u32 hi = 0; hi < 0x1000; hi += 0x400) {
-                u32 c[4] = {0, 0, 0, 0};
-
-                for (u32 k = 0; k < 4; k++)
-                    for (u32 o = 0; o < 0x100; o += 4)
-                        if (mmio_read32(0x1000D000UL + hi + k * 0x100 + o))
-                            c[k]++;
-                kprintf("  +%03x: %2u %2u %2u %2u\n", hi, c[0], c[1], c[2], c[3]);
-            }
-            kprintf("C80 %x %x %x\n",
-                    mmio_read32(0x1000D000UL + 0xC80),
-                    mmio_read32(0x1000D000UL + 0xC84),
-                    mmio_read32(0x1000D000UL + 0xC88));
-            kprintf("0A0 %x %x %x\n",
-                    mmio_read32(0x1000D000UL + 0xA0),
-                    mmio_read32(0x1000D000UL + 0xA4),
-                    mmio_read32(0x1000D000UL + 0xA8));
-        }
+    if (!(con0 & 1)) {
+        kprintf("VLDO28: ВКЛЮЧИТЬ НЕ УДАЛОСЬ\n");
         return;
     }
 
-    kprintf("PWRAP: НАШЁЛ НА +%x, PMIC ID %x\n", off, id);
+    /* Питание есть — теперь снимаем сброс и смотрим на линию прерывания */
+    kprintf("ТАЧ: СНИМАЮ СБРОС\n");
+    gpio_set_dir(NVT_GPIO_RESET, GPIO_OUT);
+    gpio_write(NVT_GPIO_RESET, 0);
+    delay_ms(20);
+    gpio_write(NVT_GPIO_RESET, 1);
+    delay_ms(200);
+
+    gpio_set_dir(NVT_GPIO_IRQ, GPIO_IN);
+
+    {
+        int prev = gpio_read(NVT_GPIO_IRQ);
+        u32 changes = 0;
+        u64 end = read_cntpct() + read_cntfrq() * 30;
+
+        kprintf("ТАЧ: ЛИНИЯ %d, КАСАЙСЯ ЭКРАНА 30 СЕК\n", prev);
+        while (read_cntpct() < end) {
+            int now = gpio_read(NVT_GPIO_IRQ);
+
+            if (now != prev) {
+                changes++;
+                prev = now;
+                if (changes < 40)
+                    kprintf("ТАЧ: ЛИНИЯ -> %d (%u)\n", now, changes);
+            }
+        }
+        kprintf("ТАЧ: ИТОГО ПЕРЕКЛЮЧЕНИЙ %u\n", changes);
+    }
+#endif
+}
+
+static void pmic_probe(void)
+{
+#if defined(BOARD_MERLIN)
+    u16 id = 0, con0 = 0, en = 0;
+
+    /*
+     * Канал связи с PMIC найден дампом всего блока: загрузчик пользуется
+     * третьим каналом (0xC20), и там остался след его последней команды.
+     * Готовность отмечается старшим битом ответа — это и было причиной
+     * того, что перебор смещений ничего не находил.
+     *
+     * Проверяем канал самым безобидным способом: спрашиваем у PMIC его
+     * собственный идентификатор. Это чтение, оно ничего не меняет.
+     */
+    if (pmic_read(MT6358_SWCID, &id) != 0) {
+        kprintf("PMIC: ОТВЕТА НЕТ\n");
+        return;
+    }
+    /* Ждём 0x5820: это настоящий идентификатор MT6358. Если придёт он —
+     * значит задержка вылечила отставание ответов на один запрос. */
+    kprintf("PMIC: ID %x %s\n", id, id == 0x5820 ? "(MT6358, ВЕРНО)" : "(?)");
 
     if (pmic_read(MT6358_LDO_VLDO28_CON0, &con0) == 0)
         kprintf("VLDO28 CON0 %x -> ПИТАНИЕ %s\n", con0,
                 (con0 & 1) ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
-    else
-        kprintf("VLDO28: ПРОЧИТАТЬ НЕ ВЫШЛО\n");
+    if (pmic_read(MT6358_LDO_VLDO28_OP_EN, &en) == 0)
+        kprintf("VLDO28 OP_EN %x\n", en);
 #endif
 }
 
@@ -947,6 +978,12 @@ void kmain(u64 dtb_phys)
         pmic_probe();
     }
     HALT_STAGE(17);
+
+    if (20 == HALT_AT_OR_ZERO) {
+        pmic_probe();
+        touch_power_on();
+    }
+    HALT_STAGE(20);
 
     if (18 == HALT_AT_OR_ZERO) {
         fb_clear(COLOR_BLACK);
