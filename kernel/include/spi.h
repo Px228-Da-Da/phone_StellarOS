@@ -30,8 +30,8 @@ void spi_pins_setup(void);
 /* Обмен по шине: приём идёт одновременно с передачей */
 int  spi_transfer(const u8 *tx, u8 *rx, u32 len);
 
-/* Первый разговор с тачскрином Novatek */
-void nvt_probe(void);
+/* Максимум за одну посылку: столько байт держит очередь контроллера */
+#define SPI_FIFO_MAX 32
 
 /* Осмотреть блок, ничего не меняя */
 void spi_probe(void);

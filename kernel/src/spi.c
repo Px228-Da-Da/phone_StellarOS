@@ -183,8 +183,6 @@ void spi_probe(void)
 #define SPI_CMD_RX_ENDIAN   (1U << 14)
 #define SPI_CMD_TX_ENDIAN   (1U << 15)
 
-#define SPI_FIFO_MAX        32
-
 /* Наружу для отладки: без документации важно видеть не только «получилось
  * или нет», но и что именно показал контроллер и сколько мы ждали. */
 u32 spi_last_status, spi_last_cmd, spi_last_spins;
@@ -214,6 +212,52 @@ void spi_pins_setup(void)
             gpio_get_mode(34), gpio_get_mode(35));
 }
 
+/*
+ * Тактовые задержки контроллера.
+ *
+ * У mt6768 узел spi0 объявлен как "mediatek,mt6765-spi", а у этой
+ * разновидности в драйвере включён enhance_timing — и раскладка регистров
+ * меняется целиком:
+ *
+ *   обычная:   CFG0 = такт_высокий | такт_низкий<<8 | удержание<<16 | установка<<24
+ *   enhance:   CFG2 = (такт_высокий-1) | (такт_низкий-1)<<16
+ *              CFG0 = (удержание-1)    | (установка-1)<<16
+ *
+ * Перепутать их не безобидно: в первый раз мы писали длительности в CFG0,
+ * а CFG2 оставляли нулём — и контроллер понимал это как «полтакта = один
+ * цикл», то есть гнал шину на 13 МГц вместо восьми разрешённых. Ответ
+ * тачскрина при этом приходил, но осмысленным не был.
+ */
+#define SPI_CFG1_CS_IDLE_SHIFT      0
+#define SPI_CFG1_PACKET_LOOP_SHIFT  8
+#define SPI_CFG1_PACKET_LEN_SHIFT   16
+
+/* Источник после spi_clk_enable() — clk26m */
+#define SPI_PARENT_HZ       26000000U
+
+/* Установка выбора кристалла: 25 тактов, как в настройках Novatek
+ * из драйвера (struct mtk_chip_config spi_ctrdata). */
+#define SPI_CS_SETUP        25U
+
+static void spi_timing(u32 hz)
+{
+    u32 div = (hz && hz < SPI_PARENT_HZ / 2)
+              ? (SPI_PARENT_HZ + hz - 1) / hz : 1;
+    u32 sck = (div + 1) / 2;            /* половина периода, в тактах */
+    u32 cs  = sck * 2;
+    u32 cfg1;
+
+    mmio_write32(MT_SPI0_BASE + SPI_CFG2,
+                 ((sck - 1) & 0xFFFF) | (((sck - 1) & 0xFFFF) << 16));
+    mmio_write32(MT_SPI0_BASE + SPI_CFG0,
+                 ((cs - 1) & 0xFFFF) | (((SPI_CS_SETUP - 1) & 0xFFFF) << 16));
+
+    cfg1 = mmio_read32(MT_SPI0_BASE + SPI_CFG1) & ~0xFFU;
+    cfg1 |= (cs - 1) & 0xFF;            /* пауза между посылками */
+    mmio_write32(MT_SPI0_BASE + SPI_CFG1, cfg1);
+    dsb();
+}
+
 int spi_transfer(const u8 *tx, u8 *rx, u32 len)
 {
     u32 cmd, spins = 0;
@@ -221,18 +265,32 @@ int spi_transfer(const u8 *tx, u8 *rx, u32 len)
     if (!len || len > SPI_FIFO_MAX)
         return -1;
 
-    /* Длительности такта. Источник 26 МГц, делим примерно на 26 —
-     * выходит около мегагерца. Тачу можно и восемь, но начинаем медленно:
-     * на низкой частоте меньше шансов, что подведёт разводка платы. */
-    mmio_write32(MT_SPI0_BASE + SPI_CFG0,
-                 (12U << 0) | (12U << 8) | (12U << 16) | (12U << 24));
-
-    /* Длина пакета минус один, пауза между посылками */
-    mmio_write32(MT_SPI0_BASE + SPI_CFG1,
-                 ((len - 1) << 16) | (0U << 8) | 10U);
-
-    mmio_write32(MT_SPI0_BASE + SPI_CFG2, 0);
+    /* Режим 0, старший бит первым, порядок байт как у процессора,
+     * без DMA, без пауз, выбор кристалла снимается сам. */
+    cmd = SPI_CMD_TXMSBF | SPI_CMD_RXMSBF;
+    mmio_write32(MT_SPI0_BASE + SPI_CMD, cmd);
     mmio_write32(MT_SPI0_BASE + SPI_PAD_SEL, 0);
+    dsb();
+
+    /* Сброс до заполнения очереди, а не после.
+     * Раньше было наоборот, и сброс выметал только что положенные байты. */
+    mmio_write32(MT_SPI0_BASE + SPI_CMD, cmd | SPI_CMD_RST);
+    dsb();
+    mmio_write32(MT_SPI0_BASE + SPI_CMD, cmd);
+    dsb();
+
+    spi_timing(NVT_SPI_HZ);
+
+    /* Длина пакета минус один; повтор один, значит поле повтора нулевое */
+    {
+        u32 cfg1 = mmio_read32(MT_SPI0_BASE + SPI_CFG1);
+
+        cfg1 &= ~((0x3FFU << SPI_CFG1_PACKET_LEN_SHIFT) |
+                  (0xFFU << SPI_CFG1_PACKET_LOOP_SHIFT));
+        cfg1 |= (len - 1) << SPI_CFG1_PACKET_LEN_SHIFT;
+        mmio_write32(MT_SPI0_BASE + SPI_CFG1, cfg1);
+        dsb();
+    }
 
     /* Кладём в очередь то, что отдаём. Даже при чтении посылать что-то
      * обязательно: такт на шине задаёт ведущий, и без передачи не будет
@@ -244,17 +302,8 @@ int spi_transfer(const u8 *tx, u8 *rx, u32 len)
             w |= (u32)tx[i + b] << (8 * b);
         mmio_write32(MT_SPI0_BASE + SPI_TX_DATA, w);
     }
-
-    /* Сбрасываем контроллер перед посылкой: иначе он донесёт до неё
-     * состояние предыдущей, а после неудачи это состояние заведомо не то. */
-    mmio_write32(MT_SPI0_BASE + SPI_CMD, SPI_CMD_RST);
-    dsb();
-    mmio_write32(MT_SPI0_BASE + SPI_CMD, 0);
     dsb();
 
-    cmd = SPI_CMD_TXMSBF | SPI_CMD_RXMSBF;
-    mmio_write32(MT_SPI0_BASE + SPI_CMD, cmd);
-    dsb();
     mmio_write32(MT_SPI0_BASE + SPI_CMD, cmd | SPI_CMD_ACT);
     dsb();
 
@@ -281,46 +330,11 @@ int spi_transfer(const u8 *tx, u8 *rx, u32 len)
     return 0;
 }
 
-/*
- * Первый разговор с тачскрином.
- *
- * У Novatek обмен устроен так: сперва командой 0xFF задаётся страница
- * адресного пространства, потом читается нужный регистр. Первым байтом
- * посылки всегда идёт адрес: со старшим битом — запись, без него — чтение.
- *
- * Спрашиваем область с идентификатором микросхемы. Если ответ окажется не
- * сплошными нулями и не сплошными единицами — значит на том конце
- * кто-то есть.
- */
-void nvt_probe(void)
-{
-    u8 tx[8], rx[8];
-    int r;
-
-    /* Задаём страницу: команда 0xFF и адрес двумя байтами */
-    tx[0] = 0xFF;
-    tx[1] = (0x1F64E >> 15) & 0xFF;
-    tx[2] = (0x1F64E >> 7) & 0xFF;
-    r = spi_transfer(tx, 0, 3);
-    kprintf("NVT: СТРАНИЦА -> %d\n", r);
-
-    /* Читаем семь байт. Первый байт посылки — адрес внутри страницы,
-     * остальные нули: нам важно не что отдать, а что принять. */
-    for (u32 i = 0; i < 8; i++)
-        tx[i] = 0;
-    tx[0] = 0x4E;                       /* младшая часть адреса */
-    r = spi_transfer(tx, rx, 8);
-
-    kprintf("NVT: ЧТЕНИЕ -> %d, БАЙТЫ %02x %02x %02x %02x %02x %02x %02x\n",
-            r, rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7]);
-}
-
 #else
 void spi_probe(void) { }
 void clk_probe(void) { }
 void spi_clk_enable(void) { }
 void spi_alive_test(void) { }
 int  spi_transfer(const u8 *t, u8 *r, u32 n) { (void)t; (void)r; (void)n; return -1; }
-void nvt_probe(void) { }
 void spi_pins_setup(void) { }
 #endif

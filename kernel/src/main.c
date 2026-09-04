@@ -24,6 +24,7 @@
 #include "pmic.h"
 #include "usb.h"
 #include "spi.h"
+#include "nvt.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -433,12 +434,9 @@ static void touch_power_on_only(void)
     }
     kprintf("ТАЧ: ПИТАНИЕ %s\n", (con0 & 1) ? "ЕСТЬ" : "НЕТ");
 
-    gpio_set_dir(NVT_GPIO_RESET, GPIO_OUT);
-    gpio_write(NVT_GPIO_RESET, 0);
-    delay_ms(20);
-    gpio_write(NVT_GPIO_RESET, 1);
-    delay_ms(200);                      /* даём прошивке контроллера встать */
-    gpio_set_dir(NVT_GPIO_IRQ, GPIO_IN);
+    /* Сброс и линию прерывания дальше настраивает сам драйвер:
+     * у него выдержки взяты из вендорного кода, а не подобраны
+     * на глаз. */
 #endif
 }
 
@@ -967,6 +965,14 @@ void kmain(u64 dtb_phys)
      * может быть испорчен, и прочитать с него числа не выйдет. */
     fb_debug();
     HALT_STAGE(8);
+
+    /* Тачскрин. Раньше это был отладочный этап, доступный только через
+     * HALT_AT — теперь вывод уходит в консоль по USB, и держать разговор
+     * с контроллером в стороне от обычной загрузки больше незачем. */
+    touch_power_on_only();
+    spi_clk_enable();
+    spi_pins_setup();
+    nvt_probe();
 
     if (10 == HALT_AT_OR_ZERO)
         fb_flip_probe();
