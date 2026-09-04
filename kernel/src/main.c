@@ -19,6 +19,7 @@
 #include "sched.h"
 #include "spinlock.h"
 #include "fdt.h"
+#include "i2c.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -150,6 +151,8 @@ static void fb_flip_demo(void);
 static void fb_flip_probe(void);
 static void fb_stride_test(void);
 static void fb_banding_test(void);
+static void i2c0_dump(void);
+static void i2c0_scan(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -383,6 +386,90 @@ static void test_pattern(void)
     for (u32 i = 0; i < ARRAY_SIZE(colors); i++)
         fb_fill_rect(i * (w / ARRAY_SIZE(colors)), h - 120,
                      w / ARRAY_SIZE(colors), 120, colors[i]);
+}
+
+/*
+ * Кто сидит на шине I2C0.
+ *
+ * Опрашиваем каждый адрес и смотрим, подтвердит ли его кто-нибудь. Это
+ * тот же приём, что у i2cdetect в Linux, и он отвечает на вопрос, который
+ * из дерева устройства однозначно не следует: там описаны и Goodix на
+ * I2C по адресу 0x5D, и Novatek на SPI, а распаян один.
+ *
+ * Диапазон 0x08..0x77 — рабочая часть адресного пространства I2C;
+ * края зарезервированы стандартом, трогать их незачем.
+ *
+ * Печатаем короткий список, а не дамп: числа с экрана телефона читаются
+ * плохо, и чем меньше их, тем надёжнее.
+ */
+extern u32 i2c_last_stat, i2c_last_spins, i2c_stat_before, i2c_ctrl_orig;
+
+static void i2c0_scan(void)
+{
+#if defined(BOARD_MERLIN)
+    /* Сперва разбираемся, работает ли определение ответа вообще.
+     * Пробуем два адреса: 0x5d — тот, где по дереву должен быть тачскрин,
+     * и 0x11 — заведомо пустой. Если статус и число оборотов у них
+     * одинаковые, значит мы читаем не тот регистр и «ответили все». */
+    static const u8 test[] = { 0x5d, 0x11 };
+    u32 found = 0;
+
+    for (u32 i = 0; i < ARRAY_SIZE(test); i++) {
+        int r = i2c_probe(MT_I2C0_BASE, test[i]);
+
+        kprintf("I2C %02x: РЕЗ %d СТАТ %x УПР %x ОБОРОТОВ %u\n",
+                test[i], r, i2c_last_stat, i2c_ctrl_orig, i2c_last_spins);
+    }
+
+    kprintf("I2C0 ПОИСК: ");
+    for (u8 a = 0x08; a <= 0x77; a++) {
+        if (i2c_probe(MT_I2C0_BASE, a) == 0) {
+            kprintf("%x ", a);
+            found++;
+        }
+    }
+    if (!found)
+        kprintf("НИКОГО");
+    kprintf("\n");
+    kprintf("I2C0 НАЙДЕНО: %u\n", found);
+#endif
+}
+
+/*
+ * Жив ли контроллер I2C0.
+ *
+ * Первый шаг к тачскрину, и намеренно безопасный: только чтение регистров,
+ * ни одной записи. Если я ошибся картой регистров, ничего не сломается.
+ *
+ * Что говорит результат:
+ *   везде нули        -> блок не тактируется, LK его не включил, и прежде
+ *                        чем что-то слать, надо поднять ему clock;
+ *   осмысленные числа -> контроллер жив и настроен загрузчиком, можно
+ *                        переходить к обмену.
+ *
+ * Адрес и наличие блока DMA взяты из дерева самого устройства:
+ *   i2c0@11007000 reg = <0x11007000 0x1000  0x11000080 0x80>
+ */
+static void i2c0_dump(void)
+{
+#if defined(BOARD_MERLIN)
+    kprintf("I2C0 @ 0x%08lx\n", (u64)MT_I2C0_BASE);
+    for (u32 off = 0; off < 0x60; off += 0x10) {
+        kprintf("  +%02x: %08x %08x %08x %08x\n", off,
+                mmio_read32(MT_I2C0_BASE + off + 0x0),
+                mmio_read32(MT_I2C0_BASE + off + 0x4),
+                mmio_read32(MT_I2C0_BASE + off + 0x8),
+                mmio_read32(MT_I2C0_BASE + off + 0xC));
+    }
+    kprintf("DMA0 @ 0x11000080\n");
+    for (u32 off = 0; off < 0x20; off += 0x10) {
+        kprintf("  +%02x: %08x %08x %08x %08x\n", off,
+                mmio_read32(0x11000080UL + off + 0x0),
+                mmio_read32(0x11000080UL + off + 0x4),
+                mmio_read32(0x11000080UL + off + 0x8),
+                mmio_read32(0x11000080UL + off + 0xC));
+    }
+#endif
 }
 
 /*
@@ -640,7 +727,19 @@ void kmain(u64 dtb_phys)
 
     if (12 == HALT_AT_OR_ZERO)
         fb_banding_test();
-    HALT_STAGE(12);                          /* замереть на чистом экране */
+    HALT_STAGE(12);
+
+    if (13 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        i2c0_dump();
+    }
+    HALT_STAGE(13);
+
+    if (14 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        i2c0_scan();
+    }
+    HALT_STAGE(14);                          /* замереть на чистом экране */
 
     fb_flip_demo();
     HALT_STAGE(9);                          /* замереть после демонстрации */
