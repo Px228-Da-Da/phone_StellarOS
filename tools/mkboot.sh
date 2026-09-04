@@ -12,8 +12,14 @@ ORIG_BOOT="${1:-prebuilt/backup/boot.img}"
 KERNEL="${2:-kernel/build/merlin/Image}"
 OUT="${3:-out/velo-boot.img}"
 
+# Пакета mkbootimg на PyPI нет — инструмент берётся из AOSP,
+# это делает tools/setup-wsl.sh.
 command -v mkbootimg >/dev/null || {
-    echo "Нет mkbootimg. Установить:  pip3 install --user mkbootimg" >&2
+    echo "Нет mkbootimg. Поставить:  bash tools/setup-wsl.sh" >&2
+    exit 1
+}
+command -v unpack_bootimg >/dev/null || {
+    echo "Нет unpack_bootimg. Поставить:  bash tools/setup-wsl.sh" >&2
     exit 1
 }
 [ -f "$ORIG_BOOT" ] || { echo "Нет оригинального boot.img: $ORIG_BOOT" >&2; exit 1; }
