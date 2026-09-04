@@ -21,6 +21,7 @@
 #include "fdt.h"
 #include "i2c.h"
 #include "gpio.h"
+#include "pmic.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -156,6 +157,7 @@ static void i2c0_dump(void);
 static void i2c0_scan(void);
 static void gpio_check(void);
 static void touch_wake(void);
+static void pmic_probe(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -389,6 +391,84 @@ static void test_pattern(void)
     for (u32 i = 0; i < ARRAY_SIZE(colors); i++)
         fb_fill_rect(i * (w / ARRAY_SIZE(colors)), h - 120,
                      w / ARRAY_SIZE(colors), 120, colors[i]);
+}
+
+/*
+ * Работает ли канал к PMIC.
+ *
+ * Смещения регистров обёртки PWRAP у разных поколений MediaTek разные, и
+ * какое из них у MT6768, по дереву не понять. Поэтому проверяем оба
+ * вероятных варианта за одну прошивку: просим у PMIC его собственный
+ * идентификатор и смотрим, какой набор смещений даст осмысленный ответ.
+ *
+ * Идентификатор выбран намеренно: это чтение, оно ничего не меняет, а
+ * значение заведомо не ноль и не 0xFFFF — спутать с мусором нельзя.
+ */
+static void pmic_probe(void)
+{
+#if defined(BOARD_MERLIN)
+    u16 id = 0, con0 = 0;
+    u32 off;
+
+    kprintf("PWRAP: ИЩУ РЕГИСТРЫ ПЕРЕБОРОМ...\n");
+    off = pmic_find_regs(&id);
+
+    if (!off) {
+        kprintf("PWRAP: НЕ НАШЁЛ НИ ОДНОГО\n");
+        {
+            /* Самое простое объяснение — блок не затактирован: тогда все его
+             * регистры читаются нулями, и перебор обречён по определению.
+             * Проверяем прямо, а заодно сверяемся с заведомо живым GPIO:
+             * если и там ноль, значит дело не в тактировании, а в доступе
+             * к памяти вообще. */
+            u32 nz = 0, first_off = 0, first_val = 0;
+
+            for (u32 o = 0; o < 0x1000; o += 4) {
+                u32 v = mmio_read32(0x1000D000UL + o);
+
+                if (v) {
+                    if (!nz) { first_off = o; first_val = v; }
+                    nz++;
+                }
+            }
+            kprintf("PWRAP: НЕНУЛЕВЫХ %u ИЗ 1024\n", nz);
+            if (nz)
+                kprintf("PWRAP: ПЕРВОЕ +%x = %x\n", first_off, first_val);
+            kprintf("СВЕРКА GPIO +0 = %x (ДОЛЖНО БЫТЬ НЕ 0)\n",
+                    mmio_read32(MT_GPIO_BASE));
+            /* Где именно в блоке живут регистры. Печатаем по одному
+             * числу на каждые 256 байт: полный дамп с экрана не прочитать,
+             * а карта распределения сразу покажет, в каком углу искать. */
+            kprintf("КАРТА ПО 256Б:\n");
+            for (u32 hi = 0; hi < 0x1000; hi += 0x400) {
+                u32 c[4] = {0, 0, 0, 0};
+
+                for (u32 k = 0; k < 4; k++)
+                    for (u32 o = 0; o < 0x100; o += 4)
+                        if (mmio_read32(0x1000D000UL + hi + k * 0x100 + o))
+                            c[k]++;
+                kprintf("  +%03x: %2u %2u %2u %2u\n", hi, c[0], c[1], c[2], c[3]);
+            }
+            kprintf("C80 %x %x %x\n",
+                    mmio_read32(0x1000D000UL + 0xC80),
+                    mmio_read32(0x1000D000UL + 0xC84),
+                    mmio_read32(0x1000D000UL + 0xC88));
+            kprintf("0A0 %x %x %x\n",
+                    mmio_read32(0x1000D000UL + 0xA0),
+                    mmio_read32(0x1000D000UL + 0xA4),
+                    mmio_read32(0x1000D000UL + 0xA8));
+        }
+        return;
+    }
+
+    kprintf("PWRAP: НАШЁЛ НА +%x, PMIC ID %x\n", off, id);
+
+    if (pmic_read(MT6358_LDO_VLDO28_CON0, &con0) == 0)
+        kprintf("VLDO28 CON0 %x -> ПИТАНИЕ %s\n", con0,
+                (con0 & 1) ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+    else
+        kprintf("VLDO28: ПРОЧИТАТЬ НЕ ВЫШЛО\n");
+#endif
 }
 
 /*
@@ -837,7 +917,13 @@ void kmain(u64 dtb_phys)
         gpio_check();
         touch_wake();
     }
-    HALT_STAGE(16);                          /* замереть на чистом экране */
+    HALT_STAGE(16);
+
+    if (17 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        pmic_probe();
+    }
+    HALT_STAGE(17);                          /* замереть на чистом экране */
 
     fb_flip_demo();
     HALT_STAGE(9);                          /* замереть после демонстрации */
