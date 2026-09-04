@@ -371,6 +371,8 @@ static const u8 desc_str2[32] = {
  */
 static struct spinlock usb_lock = SPINLOCK_INIT("usb");
 
+static void ring_drain_locked(void);     /* определена ниже, в консоли */
+
 static const u8 *ep0_tx;
 static u32 ep0_tx_left;
 static u8  ep0_addr_pending;
@@ -480,8 +482,23 @@ static void ep0_setup(const u8 *p)
             return;
         case 0x09:
             usb_configured = (val != 0);
-            if (usb_configured)
+            if (usb_configured) {
                 bulk_setup();
+                /*
+                 * Отдаём сразу, без задержки.
+                 *
+                 * Пробовали придержать буфер на две секунды, чтобы терминал
+                 * успел открыть порт и поймал загрузочный отчёт целиком. Не
+                 * вышло: ядро всё это время продолжает печатать, кольцо
+                 * переполняется, и вытесняется как раз начало — ровно то,
+                 * ради чего задержка и делалась.
+                 *
+                 * Начало загрузки пока теряется. Это неприятно, но терпимо:
+                 * всё, что печатается после подключения терминала, видно
+                 * полностью. Правильное решение — отдельный буфер под
+                 * загрузочный отчёт, который не вытесняется живым выводом.
+                 */
+            }
             mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
             return;
         case 0x08: d = &val_one;  dlen = 1; break;
@@ -598,6 +615,10 @@ void usb_poll(void)
 
     flags = spin_lock_irq(&usb_lock);
     usb_poll_locked();
+    /* Отдаём накопленное здесь, а не в самой печати: usb_send_locked
+     * в ожидании вызывает обслуживание нулевой точки, и вызов отдачи
+     * оттуда же ушёл бы в бесконечную рекурсию. */
+    ring_drain_locked();
     spin_unlock_irq(&usb_lock, flags);
 }
 
@@ -651,39 +672,76 @@ int usb_ready(void) { return usb_configured; }
 
 /* ================== Консоль поверх USB ==================
  *
- * Посимвольная отправка была бы расточительной: каждый символ уходил бы
- * отдельным пакетом. Поэтому копим строку и отдаём её целиком по переводу
- * строки или когда буфер полон.
+ * Печатать может любое ядро, а в контроллер лезет только нулевое —
+ * иначе восемь ядер дерутся за окно выбора конечной точки. Поэтому
+ * между ними стоит кольцевой буфер: печать кладёт в него байты откуда
+ * угодно, а нулевое ядро при очередном обслуживании отдаёт накопленное.
  *
- * Терминалы ждут пару «возврат каретки + перевод строки», поэтому возврат
- * подставляем сами: внутри ядра строки заканчиваются одним переводом.
+ * Первая версия просто выбрасывала строки с остальных ядер. До запуска
+ * планировщика это было незаметно, а после — пропал почти весь вывод:
+ * задачи печатают с того ядра, на котором их застал квант.
  */
-static u8  con_buf[256];
-static u32 con_len;
+/*
+ * Буфер держим большим намеренно: консоль подключается через несколько
+ * секунд после старта, а самое интересное ядро печатает в первые
+ * мгновения — карту памяти, состояние GIC, отчёт о запуске ядер. Копим
+ * всё с первой строки и отдаём разом, как только появится кому.
+ */
+#define CON_RING 16384                  /* степень двойки: маска вместо деления */
 
-void usb_flush(void)
+static u8  ring[CON_RING];
+static u32 ring_head, ring_tail;
+
+static void ring_put(u8 c)
 {
-    if (!con_len)
-        return;
-    if (usb_configured)
-        usb_send(con_buf, con_len);
-    con_len = 0;
+    u32 next = (ring_head + 1) & (CON_RING - 1);
+
+    /* Переполнение: теряем самое старое. Лучше свежий вывод без начала,
+     * чем застрявшая печать в ожидании места. */
+    if (next == ring_tail)
+        ring_tail = (ring_tail + 1) & (CON_RING - 1);
+    ring[ring_head] = c;
+    ring_head = next;
 }
 
 void usb_putc(char c)
 {
-    /* До перечисления копить бессмысленно: буфер переполнится задолго до
-     * того, как появится кому отдавать. */
-    if (!usb_configured)
+    u64 flags;
+
+    /* Копим независимо от того, подключён ли хост: иначе весь загрузочный
+     * отчёт пропадает, а он и есть самое ценное. */
+    flags = spin_lock_irq(&usb_lock);
+    if (c == 10)
+        ring_put(13);                   /* терминалы ждут пару CR+LF */
+    ring_put((u8)c);
+    spin_unlock_irq(&usb_lock, flags);
+}
+
+/* Отдать накопленное. Вызывается под замком и только с нулевого ядра. */
+static void ring_drain_locked(void)
+{
+    u8 buf[64];
+
+    while (ring_tail != ring_head) {
+        u32 n = 0;
+
+        while (n < sizeof(buf) && ring_tail != ring_head) {
+            buf[n++] = ring[ring_tail];
+            ring_tail = (ring_tail + 1) & (CON_RING - 1);
+        }
+        usb_send_locked(buf, n);
+    }
+}
+
+void usb_flush(void)
+{
+    u64 flags;
+
+    if (!usb_configured || cpu_id() != 0)
         return;
-
-    if (c == 10 && con_len < sizeof(con_buf))
-        con_buf[con_len++] = 13;
-    if (con_len < sizeof(con_buf))
-        con_buf[con_len++] = (u8)c;
-
-    if (c == 10 || con_len >= sizeof(con_buf) - 2)
-        usb_flush();
+    flags = spin_lock_irq(&usb_lock);
+    ring_drain_locked();
+    spin_unlock_irq(&usb_lock, flags);
 }
 
 #else
