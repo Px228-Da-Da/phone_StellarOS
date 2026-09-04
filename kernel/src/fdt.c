@@ -577,6 +577,37 @@ void fdt_set_root(u64 dtb_phys)
     root_dtb = fdt_check(dtb_phys) == 0 ? dtb_phys : 0;
 }
 
+int fdt_node_prop_u32(u64 dtb_phys, const char *node_name, const char *prop,
+                      u32 *out)
+{
+    struct fdt_iter it;
+    struct fdt_event ev;
+    int found = 0;
+    u32 node_depth = 0;
+
+    if (fdt_iter_init(dtb_phys, &it) != 0)
+        return -1;
+
+    while (fdt_next(&it, &ev) == 0) {
+        if (ev.kind == FDT_EV_NODE && node_name_eq(ev.name, node_name)) {
+            found = 1;
+            node_depth = ev.depth;
+            continue;
+        }
+
+        if (found && ev.kind == FDT_EV_END_NODE && ev.depth == node_depth)
+            break;                      /* узел кончился, свойства нет */
+
+        if (found && ev.kind == FDT_EV_PROP && ev.depth == node_depth &&
+            str_eq(ev.name, prop) && ev.len >= 4) {
+            *out = be32p(ev.data);
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 u64 fdt_root(void)
 {
     return root_dtb;

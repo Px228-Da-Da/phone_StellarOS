@@ -12,6 +12,7 @@
  */
 #include "fb.h"
 #include "io.h"
+#include "fdt.h"
 
 extern const u8 font8x8[64][8];
 extern const u8 font_cyr[33][8];
@@ -52,19 +53,91 @@ static struct {
  * пока читаем регистр оверлея — он не требует парсера.
  */
 
+/* Чем именно нашли буфер — видно снаружи через диагностику:
+ * 0 не нашли, 1 из device tree, 2 из регистра оверлея. */
+int fb_probe_source;
+u32 fb_lcm_inited;                      /* включил ли LK саму панель */
+
+/*
+ * Адрес из device tree — источник, задуманный в проекте с самого начала.
+ *
+ * LK кладёт в /chosen физический адрес буфера, который сам же и показывает,
+ * двумя половинами: atag,videolfb-fb_base_h и -fb_base_l. Это надёжнее
+ * чтения регистра оверлея: регистр отражает лишь текущее состояние
+ * контроллера, а к моменту передачи управления оно может быть уже сброшено.
+ * Из-под Android эти свойства не прочитать, SELinux не пускает shell,
+ * но наше ядро работает в EL1 и берёт их свободно.
+ */
+static int fb_probe_dtb(u64 *addr_out)
+{
+    u64 dtb = fdt_root();
+    u32 hi = 0, lo = 0;
+
+    if (!dtb)
+        return -1;
+    if (fdt_node_prop_u32(dtb, "chosen", "atag,videolfb-fb_base_h", &hi) != 0)
+        return -1;
+    if (fdt_node_prop_u32(dtb, "chosen", "atag,videolfb-fb_base_l", &lo) != 0)
+        return -1;
+
+    /* Заодно запоминаем, поднял ли загрузчик панель: если нет, писать
+     * в память бесполезно, экран останется тёмным при любом адресе. */
+    fdt_node_prop_u32(dtb, "chosen", "atag,videolfb-islcm_inited", &fb_lcm_inited);
+
+    *addr_out = ((u64)hi << 32) | lo;
+    return 0;
+}
+
+/* Отдельно: включил ли загрузчик панель. Если нет, писать в буфер
+ * бесполезно при любом адресе. */
+static int fb_probe_dtb_lcm(void)
+{
+    u64 dtb = fdt_root();
+
+    if (!dtb)
+        return -1;
+    return fdt_node_prop_u32(dtb, "chosen", "atag,videolfb-islcm_inited",
+                             &fb_lcm_inited);
+}
+
 static int fb_probe(void)
 {
     u32 size  = mmio_read32(MT_DISP_OVL0_BASE + OVL_L0_SRC_SIZE);
     u32 pitch = mmio_read32(MT_DISP_OVL0_BASE + OVL_L0_PITCH) & 0xFFFF;
-    u32 addr  = mmio_read32(MT_DISP_OVL0_BASE + OVL_L0_ADDR);
     u32 w = size & 0xFFFF;
     u32 h = (size >> 16) & 0xFFFF;
+    u64 addr = 0;
 
-    /* Санитарная проверка: не поверим мусору и не запишем куда попало */
-    if (addr < 0x40000000 || addr > 0xC0000000)
+    fb_probe_source = 0;
+
+    /*
+     * Сперва регистр оверлея, дерево — запасной вариант.
+     *
+     * Порядок именно такой по итогам опыта на живом устройстве: с адресом
+     * из регистра наша заливка доходила до экрана (логотип загрузчика
+     * закрашивался), а с адресом из /chosen логотип оставался нетронутым.
+     * То есть в дереве LK оставляет адрес какого-то другого буфера, а
+     * показывает он тот, что прописан в оверлее.
+     */
+    addr = mmio_read32(MT_DISP_OVL0_BASE + OVL_L0_ADDR);
+    if (addr >= 0x40000000 && addr <= 0xC0000000) {
+        fb_probe_source = 2;
+    } else if (fb_probe_dtb(&addr) == 0 &&
+               addr >= 0x40000000 && addr < 0x100000000UL) {
+        fb_probe_source = 1;
+    } else {
         return -1;
-    if (w == 0 || h == 0 || w > 4096 || h > 4096)
-        return -1;
+    }
+
+    /* Панель нас интересует независимо от источника адреса */
+    (void)fb_probe_dtb_lcm();
+
+    /* Размеры: регистру верим только если он выдал правдоподобное.
+     * Иначе берём паспортные — панель merlinnfc известна и не меняется. */
+    if (w == 0 || h == 0 || w > 4096 || h > 4096) {
+        w = MERLIN_FB_WIDTH;
+        h = MERLIN_FB_HEIGHT;
+    }
     if (pitch < w * 4)
         pitch = w * 4;
 
@@ -74,6 +147,7 @@ static int fb_probe(void)
     fb.stride_px = pitch / 4;
     return 0;
 }
+
 #else
 #include "ramfb.h"
 

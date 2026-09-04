@@ -2,14 +2,22 @@
 #define FB_H
 #include "types.h"
 
-/* Цвета в формате 0x00RRGGBB (реальный порядок каналов панели уточняется опытом) */
-#define COLOR_BLACK   0x00000000
-#define COLOR_WHITE   0x00FFFFFF
-#define COLOR_RED     0x00FF0000
-#define COLOR_GREEN   0x0000FF00
-#define COLOR_BLUE    0x000000FF
-#define COLOR_YELLOW  0x00FFFF00
-#define COLOR_CYAN    0x0000FFFF
+/*
+ * Цвета в формате 0xAARRGGBB.
+ *
+ * Альфа обязана быть 0xFF, а не нулём. Панель merlin работает в ARGB8888,
+ * и нулевая альфа означает «полностью прозрачно»: нарисованное не видно,
+ * сквозь него просвечивает чёрный фон. Именно так выглядела первая рабочая
+ * прошивка — экран чернел (наша заливка доходила до буфера), но текст на
+ * нём не появлялся, потому что был прозрачным.
+ */
+#define COLOR_BLACK   0xFF000000
+#define COLOR_WHITE   0xFFFFFFFF
+#define COLOR_RED     0xFFFF0000
+#define COLOR_GREEN   0xFF00FF00
+#define COLOR_BLUE    0xFF0000FF
+#define COLOR_YELLOW  0xFFFFFF00
+#define COLOR_CYAN    0xFF00FFFF
 
 int  fb_init(void);                     /* 0 = ок, экран есть */
 int  fb_available(void);

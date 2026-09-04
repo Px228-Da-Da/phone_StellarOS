@@ -83,6 +83,18 @@ int fdt_compatible_reg(u64 dtb_phys, const char *compat, u32 index,
 
 int fdt_interrupt(u64 dtb_phys, const char *compat, u32 index, u32 *intid_out);
 
+/*
+ * Прочитать 32-битное свойство узла.
+ *
+ * Нужно для /chosen: там LK оставляет параметры, которые больше нигде не
+ * взять. Адрес фреймбуфера лежит двумя половинами в atag,videolfb-fb_base_h
+ * и -fb_base_l, а atag,videolfb-islcm_inited говорит, включил ли загрузчик
+ * саму панель. Из-под Android эти свойства закрыты SELinux, а нам из EL1
+ * они доступны свободно.
+ */
+int fdt_node_prop_u32(u64 dtb_phys, const char *node_name, const char *prop,
+                      u32 *out);
+
 /* Запомнить дерево, переданное загрузчиком, чтобы не таскать адрес всюду */
 void fdt_set_root(u64 dtb_phys);
 u64  fdt_root(void);
