@@ -22,6 +22,7 @@
 #include "i2c.h"
 #include "gpio.h"
 #include "pmic.h"
+#include "usb.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -923,7 +924,22 @@ void kmain(u64 dtb_phys)
         fb_clear(COLOR_BLACK);
         pmic_probe();
     }
-    HALT_STAGE(17);                          /* замереть на чистом экране */
+    HALT_STAGE(17);
+
+    if (18 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        usb_probe();
+    }
+    HALT_STAGE(18);
+
+    if (19 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        usb_probe();
+        usb_phy_on();
+        usb_connect();
+        usb_watch(40);
+    }
+    HALT_STAGE(19);                          /* замереть на чистом экране */
 
     fb_flip_demo();
     HALT_STAGE(9);                          /* замереть после демонстрации */

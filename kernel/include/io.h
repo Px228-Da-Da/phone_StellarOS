@@ -25,6 +25,21 @@ static inline u8 mmio_read8(uintptr_t addr)
     return *(volatile u8 *)addr;
 }
 
+/*
+ * Двухбайтовый доступ. Понадобился для контроллера USB: у MUSB часть
+ * регистров шириной ровно в два байта, и обратиться к ним словом нельзя —
+ * соседний регистр при этом тоже будет прочитан или, хуже, перезаписан.
+ */
+static inline void mmio_write16(uintptr_t addr, u16 val)
+{
+    *(volatile u16 *)addr = val;
+}
+
+static inline u16 mmio_read16(uintptr_t addr)
+{
+    return *(volatile u16 *)addr;
+}
+
 static inline void mmio_write32(uintptr_t addr, u32 val)
 {
     *(volatile u32 *)addr = val;
