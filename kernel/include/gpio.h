@@ -25,6 +25,10 @@ int  gpio_read(u32 pin);            /* состояние линии */
 int  gpio_read_out(u32 pin);        /* что мы сами туда выставили */
 
 void gpio_set_dir(u32 pin, int dir);
+
+/* Переключить вывод на аппаратную функцию: 0 — обычный вывод,
+ * остальные значения зависят от вывода (см. pinctrl в исходниках) */
+void gpio_set_mode(u32 pin, u32 mode);
 void gpio_write(u32 pin, int value);
 
 #endif

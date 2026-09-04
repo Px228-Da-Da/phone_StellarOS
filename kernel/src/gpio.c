@@ -80,6 +80,27 @@ void gpio_set_dir(u32 pin, int dir)
     dsb();
 }
 
+/*
+ * Переключить вывод на аппаратную функцию.
+ *
+ * Каждому выводу отведено четыре бита, то есть восемь выводов на регистр.
+ * Меняем поле в два приёма: сначала сбрасываем все четыре бита, потом
+ * ставим нужные. Читать-модифицировать-писать нельзя — соседние выводы
+ * в том же регистре может в это время настраивать другое ядро.
+ */
+void gpio_set_mode(u32 pin, u32 mode)
+{
+    u64 reg = mode_reg(pin);
+    u32 shift = (pin % 8) * 4;
+
+    if (pin >= MT_GPIO_COUNT || mode > 0xF)
+        return;
+
+    mmio_write32(reg + REG_CLR, 0xFU << shift);
+    mmio_write32(reg + REG_SET, mode << shift);
+    dsb();
+}
+
 void gpio_write(u32 pin, int value)
 {
     u64 reg = bank_reg(GPIO_DOUT_BASE, pin);
@@ -97,6 +118,7 @@ int  gpio_get_mode(u32 pin) { (void)pin; return -1; }
 int  gpio_read(u32 pin)     { (void)pin; return -1; }
 int  gpio_read_out(u32 pin) { (void)pin; return -1; }
 void gpio_set_dir(u32 pin, int dir) { (void)pin; (void)dir; }
+void gpio_set_mode(u32 pin, u32 mode) { (void)pin; (void)mode; }
 void gpio_write(u32 pin, int value) { (void)pin; (void)value; }
 
 #endif

@@ -165,6 +165,7 @@ static void gpio_check(void);
 static void touch_wake(void);
 static void pmic_probe(void);
 static void touch_power_on(void);
+static void touch_power_on_only(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -411,6 +412,36 @@ static void test_pattern(void)
  * Идентификатор выбран намеренно: это чтение, оно ничего не меняет, а
  * значение заведомо не ноль и не 0xFFFF — спутать с мусором нельзя.
  */
+/*
+ * Только питание и сброс, без ожидания.
+ *
+ * Отдельно от touch_power_on: та тридцать секунд следит за линией
+ * прерывания, а перед разговором по SPI ждать нечего — контроллеру
+ * нужно лишь напряжение и снятый сброс.
+ */
+static void touch_power_on_only(void)
+{
+#if defined(BOARD_MERLIN)
+    u16 con0 = 0;
+
+    if (pmic_read(MT6358_LDO_VLDO28_CON0, &con0) != 0)
+        return;
+    if (!(con0 & 1)) {
+        pmic_write(MT6358_LDO_VLDO28_CON0, (u16)(con0 | 1));
+        delay_ms(5);
+        pmic_read(MT6358_LDO_VLDO28_CON0, &con0);
+    }
+    kprintf("ТАЧ: ПИТАНИЕ %s\n", (con0 & 1) ? "ЕСТЬ" : "НЕТ");
+
+    gpio_set_dir(NVT_GPIO_RESET, GPIO_OUT);
+    gpio_write(NVT_GPIO_RESET, 0);
+    delay_ms(20);
+    gpio_write(NVT_GPIO_RESET, 1);
+    delay_ms(200);                      /* даём прошивке контроллера встать */
+    gpio_set_dir(NVT_GPIO_IRQ, GPIO_IN);
+#endif
+}
+
 /*
  * Включить питание тачскрина и разбудить его.
  *
@@ -987,8 +1018,11 @@ void kmain(u64 dtb_phys)
     HALT_STAGE(20);
 
     if (21 == HALT_AT_OR_ZERO) {
-        spi_probe();
-        clk_probe();
+        touch_power_on_only();
+        spi_clk_enable();
+        spi_alive_test();
+        spi_pins_setup();
+        nvt_probe();
     }
     HALT_STAGE(21);
 
