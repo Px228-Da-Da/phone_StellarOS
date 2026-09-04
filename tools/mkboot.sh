@@ -2,8 +2,14 @@
 # Упаковка нашего ядра в Android boot.img, который примет LK.
 #
 # Идея: не выдумывать параметры, а взять их из ОРИГИНАЛЬНОГО boot.img
-# телефона (base, offsets, page size, cmdline) и подменить только ядро.
-# Так исключаем целый класс ошибок «образ собран, но LK его не грузит».
+# телефона и подменить ровно одно — ядро. unpack_bootimg умеет отдать
+# готовую командную строку mkbootimg (--format mkbootimg), поэтому копируем
+# у оригинала всё сразу: версию заголовка, страницу, смещения, cmdline и DTB.
+#
+# Почему это важно: у merlin заголовок версии 2 и внутри лежит DTB на
+# 110 КБ. Собранный «на глазок» образ v0 без DTB загрузчик не берёт.
+#
+# Ядро кладём сжатым: в стоковом образе тоже gzip, а не голый Image.
 #
 # Запуск: tools/mkboot.sh prebuilt/backup/boot.img kernel/build/merlin/Image
 set -e
@@ -11,45 +17,46 @@ set -e
 ORIG_BOOT="${1:-prebuilt/backup/boot.img}"
 KERNEL="${2:-kernel/build/merlin/Image}"
 OUT="${3:-out/velo-boot.img}"
+WORK=unpacked
 
 # Пакета mkbootimg на PyPI нет — инструмент берётся из AOSP,
 # это делает tools/setup-wsl.sh.
-command -v mkbootimg >/dev/null || {
-    echo "Нет mkbootimg. Поставить:  bash tools/setup-wsl.sh" >&2
-    exit 1
-}
-command -v unpack_bootimg >/dev/null || {
-    echo "Нет unpack_bootimg. Поставить:  bash tools/setup-wsl.sh" >&2
-    exit 1
-}
+for t in mkbootimg unpack_bootimg; do
+    command -v "$t" >/dev/null || {
+        echo "Нет $t. Поставить:  bash tools/setup-wsl.sh" >&2
+        exit 1
+    }
+done
 [ -f "$ORIG_BOOT" ] || { echo "Нет оригинального boot.img: $ORIG_BOOT" >&2; exit 1; }
 [ -f "$KERNEL" ]    || { echo "Нет ядра: $KERNEL (сделай make BOARD=merlin)" >&2; exit 1; }
 
-mkdir -p out unpacked
-echo "==> Разбираю оригинальный boot.img, чтобы взять его параметры"
-unpack_bootimg --boot_img "$ORIG_BOOT" --out unpacked > unpacked/params.txt
-cat unpacked/params.txt
+mkdir -p out "$WORK"
 
-# Достаём параметры из отчёта unpack_bootimg
-PAGESIZE=$(grep -oP 'page size:\s*\K[0-9]+'          unpacked/params.txt | head -1)
-OSVER=$(grep -oP 'os version:\s*\K\S+'               unpacked/params.txt | head -1)
-OSPATCH=$(grep -oP 'os patch level:\s*\K\S+'         unpacked/params.txt | head -1)
-HDRVER=$(grep -oP 'boot image header version:\s*\K[0-9]+' unpacked/params.txt | head -1)
-CMDLINE=$(grep -oP 'command line args:\s*\K.*'       unpacked/params.txt | head -1)
+echo "==> Разбираю оригинальный boot.img"
+rm -rf "$WORK"; mkdir -p "$WORK"
+unpack_bootimg --boot_img "$ORIG_BOOT" --out "$WORK" > "$WORK/info.txt"
+unpack_bootimg --boot_img "$ORIG_BOOT" --format info | sed -n '1,12p'
 
 echo
-echo "==> Собираю velo-boot.img (header v${HDRVER}, page ${PAGESIZE})"
-echo "    ВНИМАНИЕ: ramdisk намеренно НЕ кладём — нашему ядру он не нужен."
+echo "==> Сжимаю ядро (в оригинале тоже gzip)"
+gzip -9 -c "$KERNEL" > out/Image.gz
+echo "    $(stat -c%s "$KERNEL") -> $(stat -c%s out/Image.gz) байт"
 
-mkbootimg \
-    --kernel "$KERNEL" \
-    --header_version "${HDRVER:-2}" \
-    --pagesize "${PAGESIZE:-2048}" \
-    --os_version "${OSVER:-12.0.0}" \
-    --os_patch_level "${OSPATCH:-2022-09}" \
-    --cmdline "$CMDLINE" \
-    --output "$OUT"
+# Готовая строка аргументов от оригинала. Пути в ней даны с префиксом out/,
+# переставляем их на наш каталог распаковки и подменяем ядро на своё.
+ARGS=$(unpack_bootimg --boot_img "$ORIG_BOOT" --format mkbootimg \
+       | sed -e "s#out/#$WORK/#g" -e "s#--kernel $WORK/kernel#--kernel out/Image.gz#")
 
 echo
-echo "Готово: $OUT"
+echo "==> Собираю $OUT с параметрами оригинала"
+echo "    $ARGS"
+rm -f "$OUT"
+eval mkbootimg $ARGS -o "$OUT"
+
+echo
+echo "==> Проверка собранного"
+unpack_bootimg --boot_img "$OUT" --format info \
+    | grep -iE "header version|page size|kernel load|kernel_size|tags|dtb size|command line"
+echo
+echo "Готово: $OUT ($(stat -c%s "$OUT") байт)"
 echo "Прошивка:  tools/flash.sh $OUT"
