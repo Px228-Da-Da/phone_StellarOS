@@ -13,6 +13,9 @@
 #include "fb.h"
 #include "io.h"
 #include "fdt.h"
+#include "pmm.h"
+#include "mmu.h"
+#include "print.h"
 
 extern const u8 font8x8[64][8];
 extern const u8 font_cyr[33][8];
@@ -31,7 +34,11 @@ extern const u8 font_cyr[33][8];
 #define MARGIN        8
 
 static struct {
-    volatile u32 *base;
+    volatile u32 *base;                 /* куда рисуем прямо сейчас */
+    volatile u32 *buf[2];               /* оба кадровых буфера       */
+    u32 draw;                           /* индекс рисуемого          */
+    u32 vram_size;                      /* сколько видеопамяти отдал загрузчик */
+    int double_buffered;
     u32 width, height;
     u32 stride_px;                      /* пикселей в строке (может быть > width) */
     u32 fg, bg;
@@ -39,6 +46,19 @@ static struct {
     u32 scale;                          /* во сколько раз растянут глиф 8x8 */
     int ready;
 } fb;
+
+/* Чем именно нашли буфер — видно снаружи через диагностику:
+ * 0 не нашли, 1 из device tree, 2 из регистра оверлея. */
+int fb_probe_source;
+u32 fb_lcm_inited;                      /* включил ли LK саму панель */
+
+static void fb_present(void);           /* платформенная подмена буфера */
+
+/* Размер одного кадра в байтах */
+static u64 fb_frame_bytes(void)
+{
+    return (u64)fb.stride_px * 4 * fb.height;
+}
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -52,11 +72,6 @@ static struct {
  * и ...-fb_base_l. Перейдём на него, когда напишем разбор DTB (этап 5);
  * пока читаем регистр оверлея — он не требует парсера.
  */
-
-/* Чем именно нашли буфер — видно снаружи через диагностику:
- * 0 не нашли, 1 из device tree, 2 из регистра оверлея. */
-int fb_probe_source;
-u32 fb_lcm_inited;                      /* включил ли LK саму панель */
 
 /*
  * Адрес из device tree — источник, задуманный в проекте с самого начала.
@@ -132,6 +147,13 @@ static int fb_probe(void)
     /* Панель нас интересует независимо от источника адреса */
     (void)fb_probe_dtb_lcm();
 
+    /* Сколько видеопамяти отдал загрузчик: от этого зависит, поместится ли
+     * второй кадр рядом с первым или придётся просить память у аллокатора. */
+    fb.vram_size = 0;
+    if (fdt_root())
+        fdt_node_prop_u32(fdt_root(), "chosen", "atag,videolfb-vramSize",
+                          &fb.vram_size);
+
     /* Размеры: регистру верим только если он выдал правдоподобное.
      * Иначе берём паспортные — панель merlinnfc известна и не меняется. */
     if (w == 0 || h == 0 || w > 4096 || h > 4096) {
@@ -146,6 +168,17 @@ static int fb_probe(void)
     fb.height    = h;
     fb.stride_px = pitch / 4;
     return 0;
+}
+
+/*
+ * Настоящий page flip: контроллер дисплея начнёт выводить другой буфер.
+ * Адрес слоя мы из этого регистра читаем — значит можем и записать.
+ */
+static void fb_present(void)
+{
+    mmio_write32(MT_DISP_OVL0_BASE + OVL_L0_ADDR,
+                 (u32)(uintptr_t)fb.buf[fb.draw]);
+    dsb();
 }
 
 #else
@@ -180,7 +213,27 @@ static int fb_probe(void)
     fb.width     = QEMU_FB_W;
     fb.height    = QEMU_FB_H;
     fb.stride_px = QEMU_FB_W;
+    fb.vram_size = 0;                   /* ramfb второго кадра не даёт */
     return 0;
+}
+
+/*
+ * В эмуляторе адрес буфера задан один раз через fw_cfg и на лету не меняется,
+ * поэтому переключение сэмулировано копированием. Смысл в том, чтобы логика
+ * двойной буферизации отлаживалась здесь, а не сразу на телефоне: главное
+ * правило проекта — каждая фича сперва в QEMU.
+ */
+static void fb_present(void)
+{
+    volatile u32 *src = fb.buf[fb.draw];
+    volatile u32 *dst = fb.buf[0];
+    u64 words = fb_frame_bytes() / 4;
+
+    if (src == dst)
+        return;
+    for (u64 i = 0; i < words; i++)
+        dst[i] = src[i];
+    dsb();
 }
 #endif
 
@@ -200,8 +253,122 @@ int fb_init(void)
     if (fb.scale < 1)
         fb.scale = 1;
 
+    fb.buf[0] = fb.base;                /* тот, что показывает загрузчик */
+    fb.buf[1] = 0;
+    fb.draw = 0;
+    fb.double_buffered = 0;
+
     fb.ready = 1;
     return 0;
+}
+
+/*
+ * Двойная буферизация.
+ *
+ * Зачем: сейчас мы пишем прямо в тот буфер, который контроллер дисплея в этот
+ * самый момент выводит на панель. Для статичного текста незаметно, но любая
+ * перерисовка кадра покажет разрыв — половина экрана новая, половина старая.
+ *
+ * Как: рисуем во второй буфер, а показ переключаем одной записью в регистр
+ * оверлея. Адрес буфера мы оттуда читаем — значит можем и записать, и это
+ * настоящий page flip, без копирования кадра.
+ *
+ * Где взять память под второй кадр: сначала пробуем видеопамять самого
+ * загрузчика — он сообщает её размер в /chosen (atag,videolfb-vramSize) и
+ * обычно резервирует место под несколько кадров как раз для этого. Если не
+ * хватило, берём непрерывный блок у собственного аллокатора.
+ *
+ * Вызывать только после pmm_init: до него запасного пути просто нет.
+ */
+int fb_double_buffer(int on)
+{
+    u64 frame = fb_frame_bytes();
+
+    if (!fb.ready)
+        return -1;
+
+    if (!on) {
+        /* Возвращаем показ на исходный буфер загрузчика */
+        fb.draw = 0;
+        fb.base = fb.buf[0];
+        fb_present();
+        fb.double_buffered = 0;
+        return 0;
+    }
+
+    if (fb.double_buffered)
+        return 0;
+
+    if (!fb.buf[1]) {
+        if (fb.vram_size >= 2 * frame) {
+            /* Место есть в видеопамяти загрузчика: она уже исключена из
+             * учёта pmm, брать её безопаснее всего.
+             *
+             * Но некэшируемым в kmain помечен только ПЕРВЫЙ буфер и ровно
+             * на свою длину — второй лежит сразу за ним и попадает в
+             * обычную кэшируемую память. Без этой строки записи оседают
+             * в кэше процессора, контроллер дисплея читает DRAM напрямую
+             * и показывает старое содержимое вперемешку с новым. */
+            fb.buf[1] = fb.buf[0] + fb_frame_bytes() / 4;
+            mmu_set_range_nc((u64)(uintptr_t)fb.buf[1], frame);
+        } else {
+            u32 pages = (u32)((frame + PAGE_SIZE - 1) / PAGE_SIZE);
+            void *p = pmm_alloc_pages(pages);
+
+            if (!p)
+                return -1;
+            /* Контроллер дисплея читает DRAM мимо кэшей процессора */
+            mmu_set_range_nc((u64)(uintptr_t)p, (u64)pages * PAGE_SIZE);
+            fb.buf[1] = (volatile u32 *)p;
+        }
+    }
+
+    /* Чтобы первый же кадр не мигнул мусором, копируем в него текущий */
+    for (u64 i = 0; i < frame / 4; i++)
+        fb.buf[1][i] = fb.buf[0][i];
+    dsb();
+
+    fb.draw = 1;
+    fb.base = fb.buf[1];
+    fb.double_buffered = 1;
+    return 0;
+}
+
+/*
+ * Показать нарисованное и начать рисовать в освободившийся буфер.
+ *
+ * Копирования нет намеренно: смысл двойной буферизации в том, чтобы каждый
+ * кадр рисовался целиком заново. Дорисовывать поверх предыдущего здесь
+ * нельзя — в новом буфере лежит кадр двухдавности.
+ */
+void fb_flip(void)
+{
+    if (!fb.ready)
+        return;
+    dsb();
+    if (!fb.double_buffered)
+        return;
+
+    fb_present();                       /* показать тот, куда рисовали */
+    fb.draw ^= 1;
+    fb.base = fb.buf[fb.draw];
+}
+
+int fb_double_buffered(void) { return fb.double_buffered; }
+
+/* Всё, что известно про экран, одним куском: по фотографии издалека
+ * отличить настоящую картинку от смаза камеры невозможно, а цифры врать
+ * не станут. */
+void fb_debug(void)
+{
+    kprintf("FB БУФЕР0: 0x%016lx\n", (u64)(uintptr_t)fb.buf[0]);
+    kprintf("FB БУФЕР1: 0x%016lx\n", (u64)(uintptr_t)fb.buf[1]);
+    kprintf("FB КАДР  : %lu БАЙТ, VRAM %u БАЙТ\n",
+            fb_frame_bytes(), fb.vram_size);
+    kprintf("FB ГЕОМ  : %ux%u STRIDE %u PX\n", fb.width, fb.height,
+            fb.stride_px);
+    kprintf("FB ИСТОЧ : %d (1=DTB 2=РЕГИСТР), LCM %u\n",
+            fb_probe_source, fb_lcm_inited);
 }
 
 int fb_available(void) { return fb.ready; }
