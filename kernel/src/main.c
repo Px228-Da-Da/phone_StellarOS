@@ -23,6 +23,7 @@
 #include "gpio.h"
 #include "pmic.h"
 #include "usb.h"
+#include "spi.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -984,6 +985,12 @@ void kmain(u64 dtb_phys)
         touch_power_on();
     }
     HALT_STAGE(20);
+
+    if (21 == HALT_AT_OR_ZERO) {
+        spi_probe();
+        clk_probe();
+    }
+    HALT_STAGE(21);
 
     if (18 == HALT_AT_OR_ZERO) {
         fb_clear(COLOR_BLACK);
