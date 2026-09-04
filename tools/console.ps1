@@ -31,9 +31,19 @@ while ($true) {
 
     try { $p.Open() }
     catch {
-        # Обычное дело: телефон ещё перезагружается или ядро пока не
-        # дошло до подъёма консоли. Просто ждём и пробуем снова.
-        Start-Sleep -Seconds 1
+        # Порт обязательно освобождаем: без этого обработчик остаётся
+        # захваченным, и следующая попытка упирается в предыдущую —
+        # Windows отвечает "доступ запрещён" уже навсегда.
+        $p.Dispose()
+        $msg = $_.Exception.Message
+        if ($msg -match 'denied|запрещ') {
+            Write-Host "Порт занят другой программой. Закрой лишние окна консоли." -ForegroundColor Yellow
+            Start-Sleep -Seconds 3
+        } else {
+            # Обычное дело: телефон ещё перезагружается или ядро пока не
+            # дошло до подъёма консоли.
+            Start-Sleep -Seconds 1
+        }
         continue
     }
 
@@ -50,6 +60,7 @@ while ($true) {
         Write-Host "`nсвязь потеряна: $($_.Exception.Message)" -ForegroundColor DarkYellow
     } finally {
         if ($p.IsOpen) { $p.Close() }
+        $p.Dispose()
     }
 
     Write-Host "Жду телефон снова..." -ForegroundColor DarkGray
