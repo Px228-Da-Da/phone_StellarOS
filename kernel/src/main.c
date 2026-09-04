@@ -148,6 +148,8 @@ static void worker_task(void *arg);
 static void memory_setup(u64 dtb_phys);
 static void fb_flip_demo(void);
 static void fb_flip_probe(void);
+static void fb_stride_test(void);
+static void fb_banding_test(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -384,6 +386,69 @@ static void test_pattern(void)
 }
 
 /*
+ * Полосы от нас или от матрицы.
+ *
+ * Геометрия проверена: stride верный, заливки ложатся ровно. Значит полосы
+ * на однородном фоне могут идти от самой панели — на тёмных цветах IPS
+ * часто дают видимую неравномерность яркости.
+ *
+ * Делим экран на четыре поля по яркости, от почти чёрного к белому. Если
+ * полосы видны только на тёмных, дело в матрице и чинить нечего. Если они
+ * ровные на всех четырёх — источник в нашей записи в память.
+ */
+static void fb_banding_test(void)
+{
+    u64 base; u32 w, h, stride;
+    u32 band;
+
+    if (!fb_available())
+        return;
+
+    fb_info(&base, &w, &h, &stride);
+    band = h / 4;
+
+    fb_fill_rect(0, 0 * band, w, band, 0xFF101840);   /* тёмно-синий, наш фон */
+    fb_fill_rect(0, 1 * band, w, band, 0xFF0000FF);   /* яркий синий          */
+    fb_fill_rect(0, 2 * band, w, band, 0xFF808080);   /* серый                */
+    fb_fill_rect(0, 3 * band, w, h - 3 * band, 0xFFFFFFFF); /* белый          */
+}
+
+/*
+ * Верен ли шаг строки (stride).
+ *
+ * Рисуем сетку из заведомо прямых линий: две вертикальные по краям и
+ * горизонтальные через каждые 200 строк. Адрес пикселя считается как
+ * base + y*stride + x, поэтому ошибка в stride видна сразу:
+ *
+ *   линии строго прямые   -> шаг строки верный;
+ *   вертикальные наискось -> stride не тот, и по наклону виден настоящий:
+ *                            смещение на строку = разница шагов.
+ *
+ * Это надёжнее любых рассуждений о том, что показывает регистр PITCH.
+ */
+static void fb_stride_test(void)
+{
+    u64 base; u32 w, h, stride;
+
+    if (!fb_available())
+        return;
+
+    fb_info(&base, &w, &h, &stride);
+    fb_clear(COLOR_BLACK);
+
+    /* Вертикальные по краям: на них наклон заметнее всего */
+    fb_fill_rect(0, 0, 8, h, COLOR_GREEN);
+    fb_fill_rect(w - 8, 0, 8, h, COLOR_GREEN);
+
+    /* Горизонтальные через каждые 200 строк */
+    for (u32 y = 0; y < h; y += 200)
+        fb_fill_rect(0, y, w, 4, COLOR_RED);
+
+    /* Квадрат в углу: если stride врёт, он расползётся в параллелограмм */
+    fb_fill_rect(w / 2 - 100, h / 2 - 100, 200, 200, COLOR_CYAN);
+}
+
+/*
  * Работает ли подмена буфера вообще.
  *
  * Самый прямой опыт, какой можно поставить: заливаем НЕВИДИМЫЙ буфер
@@ -495,6 +560,7 @@ static void fb_flip_demo(void)
     kprintf("ЭКРАН    : ДВОЙНАЯ БУФЕРИЗАЦИЯ ОК, %u КАДРОВ\n", frames);
     kprintf("ОТРИСОВКА КАДРА : %lu МКС\n", ticks_to_us(draw_ticks / frames));
     kprintf("ПОКАЗ КАДРА     : %lu МКС\n", ticks_to_us(flip_ticks / frames));
+    fb_debug();                         /* тут же счётчики vsync */
 }
 
 void kmain(u64 dtb_phys)
@@ -566,7 +632,15 @@ void kmain(u64 dtb_phys)
 
     if (10 == HALT_AT_OR_ZERO)
         fb_flip_probe();
-    HALT_STAGE(10);                          /* замереть на чистом экране */
+    HALT_STAGE(10);
+
+    if (11 == HALT_AT_OR_ZERO)
+        fb_stride_test();
+    HALT_STAGE(11);
+
+    if (12 == HALT_AT_OR_ZERO)
+        fb_banding_test();
+    HALT_STAGE(12);                          /* замереть на чистом экране */
 
     fb_flip_demo();
     HALT_STAGE(9);                          /* замереть после демонстрации */

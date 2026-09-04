@@ -49,6 +49,10 @@ static struct {
 
 /* Чем именно нашли буфер — видно снаружи через диагностику:
  * 0 не нашли, 1 из device tree, 2 из регистра оверлея. */
+/* Сколько раз дождались конца кадра и сколько раз не дождались —
+ * чтобы не гадать, работает ли синхронизация вообще. */
+u32 fb_vsync_hits, fb_vsync_misses;
+
 int fb_probe_source;
 u32 fb_lcm_inited;                      /* включил ли LK саму панель */
 
@@ -174,8 +178,36 @@ static int fb_probe(void)
  * Настоящий page flip: контроллер дисплея начнёт выводить другой буфер.
  * Адрес слоя мы из этого регистра читаем — значит можем и записать.
  */
+/*
+ * Дождаться, пока панель закончит выводить кадр.
+ *
+ * Без этого подмена адреса приходится на середину вывода: верх экрана
+ * успевает уйти из старого буфера, низ идёт уже из нового, и на границе
+ * виден шов. На движущейся картинке такие швы и выглядят как множество
+ * горизонтальных полос.
+ *
+ * Сбрасываем защёлку статуса и ждём, когда RDMA поднимет флаг конца кадра.
+ * Ограничение по числу попыток обязательно: если регистр окажется не тем,
+ * ядро не должно повиснуть здесь навсегда — лучше показать шов, чем ничего.
+ */
+static void fb_wait_vsync(void)
+{
+    mmio_write32(MT_DISP_RDMA0_BASE + RDMA_INT_STATUS, 0);
+    dsb();
+
+    for (u32 i = 0; i < 2000000; i++) {
+        if (mmio_read32(MT_DISP_RDMA0_BASE + RDMA_INT_STATUS)
+            & RDMA_INT_FRAME_END) {
+            fb_vsync_hits++;
+            return;
+        }
+    }
+    fb_vsync_misses++;
+}
+
 static void fb_present(void)
 {
+    fb_wait_vsync();
     mmio_write32(MT_DISP_OVL0_BASE + OVL_L0_ADDR,
                  (u32)(uintptr_t)fb.buf[fb.draw]);
     dsb();
@@ -369,6 +401,8 @@ void fb_debug(void)
             fb.stride_px);
     kprintf("FB ИСТОЧ : %d (1=DTB 2=РЕГИСТР), LCM %u\n",
             fb_probe_source, fb_lcm_inited);
+    kprintf("VSYNC    : ПОЙМАН %u, ПРОПУЩЕН %u\n",
+            fb_vsync_hits, fb_vsync_misses);
 }
 
 int fb_available(void) { return fb.ready; }
