@@ -13,9 +13,9 @@
 | Экран | 1080x2340, IPS, MIPI DSI | |
 | Прошивка | MIUI V13.0.2.0.SJOMIXM, Android 12 | `ro.build.version.incremental` |
 | Ядро Linux | 4.14.186 | |
-| Загрузчик | **ЗАБЛОКИРОВАН** | `ro.boot.flash.locked` = 1 |
+| Загрузчик | **РАЗБЛОКИРОВАН** 04.09.2026 | `fastboot getvar unlocked` = yes |
 | OEM unlock | разрешён в настройках | `sys.oem_unlock_allowed` = 1 |
-| Verified boot | green, verity enforcing | `ro.boot.verifiedbootstate` |
+| Verified boot | отключён после разлочки | `fastboot getvar secure` = no |
 
 ## Карта регистров — снята с живого устройства
 
