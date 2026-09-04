@@ -116,6 +116,10 @@ static void halt_forever(unsigned stage)
 
     irq_disable();
 
+    /* Даже замерев, продолжаем отвечать хосту: иначе COM-порт нельзя
+     * будет открыть и прочитать то, ради чего мы остановились. */
+    usb_flush();
+
 #ifdef RESET_AT_HALT
     /*
      * Сигнал, не зависящий от экрана.
@@ -137,7 +141,7 @@ static void halt_forever(unsigned stage)
 #endif
 
     for (;;)
-        wfi();
+        usb_poll();
 }
 #define HALT_STAGE(n)   do { if ((n) == (HALT_AT)) halt_forever(n); } while (0)
 #else
@@ -200,7 +204,7 @@ static void delay_ms(u32 ms)
     u64 target = read_cntpct() + (freq / 1000) * ms;
 
     while (read_cntpct() < target)
-        ;
+        usb_poll();     /* иначе за время паузы хост объявит порт мёртвым */
 }
 
 
@@ -861,6 +865,24 @@ void kmain(u64 dtb_phys)
         banner();
     }
 
+    /*
+     * USB-консоль поднимаем как можно раньше: всё, что напечатано после
+     * этого момента, попадёт в терминал на компьютере. До сих пор
+     * единственным способом прочитать вывод была фотография экрана.
+     *
+     * Ждём перечисления не дольше трёх секунд: если компьютер не подключён,
+     * загрузка не должна из-за этого стоять.
+     */
+    usb_phy_on();
+    usb_connect();
+    {
+        u64 end = read_cntpct() + read_cntfrq() * 3;
+
+        while (read_cntpct() < end && !usb_ready())
+            usb_poll();
+    }
+    kprintf("USB      : %s\n", usb_ready() ? "КОНСОЛЬ ГОТОВА" : "НЕТ ХОСТА");
+
     HALT_STAGE(4);                          /* на экране уже должен быть текст */
     dump_cpu();
     dump_dtb(dtb_phys);
@@ -937,7 +959,33 @@ void kmain(u64 dtb_phys)
         usb_probe();
         usb_phy_on();
         usb_connect();
-        usb_watch(40);
+
+        /*
+         * Теперь не просто смотрим на шину, а отвечаем. Перечисление —
+         * это разговор: хост спрашивает дескрипторы, назначает адрес,
+         * выбирает конфигурацию, и на каждый шаг ждёт ответа. Молчание
+         * дольше отведённого времени он считает неисправностью.
+         */
+        {
+            u64 end = read_cntpct() + read_cntfrq() * 25;
+            u32 last = 0;
+
+            kprintf("USB: ОБСЛУЖИВАЮ ХОСТА...\n");
+            while (read_cntpct() < end) {
+                usb_poll();
+                if (usb_ready() && !last) {
+                    last = 1;
+                    kprintf("USB: ПЕРЕЧИСЛЕНЫ! ЗАПРОСОВ %u\n",
+                            usb_setup_count);
+                    usb_send((const u8 *)"VELO-OS: USB console alive\n", 28);
+                }
+            }
+            kprintf("USB: ИТОГ — ЗАПРОСОВ %u, %s\n", usb_setup_count,
+                    usb_ready() ? "ПЕРЕЧИСЛЕНЫ" : "НЕ ПЕРЕЧИСЛЕНЫ");
+            kprintf("USB: FADDR %x POWER %x\n",
+                    mmio_read8(MT_USB0_BASE + 0x00),
+                    mmio_read8(MT_USB0_BASE + 0x01));
+        }
     }
     HALT_STAGE(19);                          /* замереть на чистом экране */
 

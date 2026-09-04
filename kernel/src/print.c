@@ -1,6 +1,7 @@
 #include "print.h"
 #include "uart.h"
 #include "fb.h"
+#include "usb.h"
 #include "spinlock.h"
 #include <stdarg.h>
 
@@ -22,6 +23,7 @@ static void emit(char c)
 {
     uart_putc(c);
     fb_putc(c);
+    usb_putc(c);        /* третий канал: терминал на компьютере */
 }
 
 static void emit_str(const char *s)

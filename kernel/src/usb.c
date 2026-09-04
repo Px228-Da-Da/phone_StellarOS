@@ -13,6 +13,8 @@
 #include "usb.h"
 #include "io.h"
 #include "print.h"
+#include "spinlock.h"
+#include "smp.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -275,10 +277,424 @@ void usb_probe(void)
     kprintf("  INTRUSB %x РАЗРЕШЕНО %x\n", intrusb, intrusbe);
 }
 
+
+/* ================== Перечисление устройства ==================
+ *
+ * Хост уже нас видит и шлёт запросы на нулевую конечную точку, но пока
+ * никто не отвечает — Windows показывает «сбой запроса дескриптора».
+ * Отвечать на эти запросы и значит «перечислиться».
+ *
+ * Представляемся последовательным портом (класс CDC-ACM): для него в
+ * Windows есть встроенный драйвер, и телефон появится как COM-порт сам,
+ * без установки чего-либо руками.
+ */
+
+#define MUSB_CSR0           0x12    /* 16 бит */
+#define MUSB_COUNT0         0x18    /* 8  бит */
+#define MUSB_TXMAXP         0x10
+#define MUSB_TXCSR          0x12    /* тот же адрес, когда INDEX не ноль */
+#define MUSB_FIFO(ep)       (0x20 + 4 * (ep))
+
+#define CSR0_RXPKTRDY       0x0001
+#define CSR0_TXPKTRDY       0x0002
+#define CSR0_SENTSTALL      0x0004
+#define CSR0_DATAEND        0x0008
+#define CSR0_SETUPEND       0x0010
+#define CSR0_SENDSTALL      0x0020
+#define CSR0_SVDRXPKTRDY    0x0040
+#define CSR0_SVDSETUPEND    0x0080
+
+#define TXCSR_TXPKTRDY      0x0001
+#define TXCSR_FLUSHFIFO     0x0008
+#define TXCSR_CLRDATATOG    0x0040
+
+#define EP0_MAXP            64
+#define EP_BULK             2
+#define EP_BULK_MAXP        512
+
+static const u8 desc_device[18] = {
+    18, 0x01,
+    0x00, 0x02,                 /* USB 2.00 */
+    0x02, 0x00, 0x00,           /* класс CDC: система сама подберёт
+                                 * драйвер последовательного порта */
+    EP0_MAXP,
+    0xC4, 0x0B,                 /* производитель */
+    0x01, 0x56,                 /* изделие */
+    0x00, 0x01,
+    1, 2, 0,
+    1
+};
+
+#define CFG_TOTAL 67
+
+static const u8 desc_config[CFG_TOTAL] = {
+    9, 0x02, CFG_TOTAL, 0x00, 2, 1, 0, 0xC0, 50,
+
+    /* Интерфейс 0: управляющая часть порта */
+    9, 0x04, 0, 0, 1, 0x02, 0x02, 0x01, 0,
+    5, 0x24, 0x00, 0x10, 0x01,
+    5, 0x24, 0x01, 0x00, 0x01,
+    4, 0x24, 0x02, 0x02,
+    5, 0x24, 0x06, 0x00, 0x01,
+    /* Точка уведомлений: по спецификации обязана быть, мы её не используем */
+    7, 0x05, 0x81, 0x03, 0x08, 0x00, 0xFF,
+
+    /* Интерфейс 1: данные */
+    9, 0x04, 1, 0, 2, 0x0A, 0x00, 0x00, 0,
+    7, 0x05, EP_BULK, 0x02, 0x00, 0x02, 0,
+    7, 0x05, 0x80 | EP_BULK, 0x02, 0x00, 0x02, 0
+};
+
+/* Строки в UTF-16. Символы записаны кодами, чтобы исходник не зависел
+ * от кодировки файла. */
+static const u8 desc_str0[4] = { 4, 0x03, 0x09, 0x04 };
+static const u8 desc_str1[16] = {
+    16, 0x03,
+    0x56,0, 0x45,0, 0x4C,0, 0x4F,0, 0x2D,0, 0x4F,0, 0x53,0
+};
+static const u8 desc_str2[32] = {
+    32, 0x03,
+    0x56,0, 0x45,0, 0x4C,0, 0x4F,0, 0x2D,0, 0x4F,0, 0x53,0, 0x20,0,
+    0x43,0, 0x4F,0, 0x4E,0, 0x53,0, 0x4F,0, 0x4C,0, 0x45,0
+};
+
+/*
+ * Замок на контроллер.
+ *
+ * Обслуживание вызывается откуда угодно: из вывода, из пауз, из точки
+ * залипания, а после запуска планировщика — ещё и с восьми ядер сразу.
+ * У MUSB регистры конечных точек видны через одно окно (регистр INDEX),
+ * поэтому два ядра, работающие одновременно, гарантированно подменят
+ * друг другу выбранную точку и запишут данные не туда.
+ *
+ * Прерывания при этом запрещаем: вывод вызывается и из обработчиков.
+ */
+static struct spinlock usb_lock = SPINLOCK_INIT("usb");
+
+static const u8 *ep0_tx;
+static u32 ep0_tx_left;
+static u8  ep0_addr_pending;
+static u64 ep0_addr_deadline;       /* когда можно применить адрес */
+static int usb_configured;
+
+u32 usb_setup_count;
+
+static void fifo_write(u32 ep, const u8 *d, u32 n)
+{
+    for (u32 i = 0; i < n; i++)
+        mmio_write8(USB_BASE + MUSB_FIFO(ep), d[i]);
+}
+
+static void fifo_read(u32 ep, u8 *d, u32 n)
+{
+    for (u32 i = 0; i < n; i++)
+        d[i] = mmio_read8(USB_BASE + MUSB_FIFO(ep));
+}
+
+
+/* Отдать очередную порцию ответа. Хост забирает пакетами по 64 байта. */
+static void ep0_send_chunk(void)
+{
+    u32 n = ep0_tx_left > EP0_MAXP ? EP0_MAXP : ep0_tx_left;
+    u16 csr = CSR0_TXPKTRDY;
+
+    fifo_write(0, ep0_tx, n);
+    ep0_tx += n;
+    ep0_tx_left -= n;
+
+    /* Короткий пакет сам по себе означает конец посылки */
+    if (ep0_tx_left == 0 || n < EP0_MAXP)
+        csr |= CSR0_DATAEND;
+    mmio_write16(USB_BASE + MUSB_CSR0, csr);
+}
+
+static void ep0_stall(void)
+{
+    mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SENDSTALL | CSR0_SVDRXPKTRDY);
+}
+
+/* Точка данных нужна только после того, как хост выбрал конфигурацию */
+static void bulk_setup(void)
+{
+    /* Точка уведомлений. Сами мы её не используем, но объявили в
+     * дескрипторе, и драйвер порта будет её опрашивать. Ненастроенная
+     * точка отвечает мусором, поэтому настроить обязаны. */
+    mmio_write8(USB_BASE + MUSB_INDEX, 1);
+    mmio_write16(USB_BASE + MUSB_TXMAXP, 8);
+    mmio_write16(USB_BASE + MUSB_TXCSR, TXCSR_FLUSHFIFO | TXCSR_CLRDATATOG);
+
+    /* Точка данных: ради неё всё и затевалось */
+    mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+    mmio_write16(USB_BASE + MUSB_TXMAXP, EP_BULK_MAXP);
+    mmio_write16(USB_BASE + MUSB_TXCSR, TXCSR_FLUSHFIFO | TXCSR_CLRDATATOG);
+
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
+}
+
+static const u8 val_one = 1;
+static const u8 val_zero = 0;
+static const u8 line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+
+static void ep0_setup(const u8 *p)
+{
+    u8  type = p[0], req = p[1];
+    u16 val  = (u16)(p[2] | (p[3] << 8));
+    u16 len  = (u16)(p[6] | (p[7] << 8));
+    const u8 *d = 0;
+    u32 dlen = 0;
+
+    usb_setup_count++;
+
+    if ((type & 0x60) == 0x00) {
+        switch (req) {
+        case 0x06:
+            switch (val >> 8) {
+            case 1: d = desc_device; dlen = sizeof(desc_device); break;
+            case 2: d = desc_config; dlen = sizeof(desc_config); break;
+            case 3:
+                switch (val & 0xFF) {
+                case 0: d = desc_str0; dlen = sizeof(desc_str0); break;
+                case 1: d = desc_str1; dlen = sizeof(desc_str1); break;
+                case 2: d = desc_str2; dlen = sizeof(desc_str2); break;
+                }
+                break;
+            }
+            break;
+        case 0x05:
+            /* Адрес применяем ТОЛЬКО после подтверждения запроса: до этого
+             * хост ещё говорит с нами по нулевому адресу. */
+            ep0_addr_pending = (u8)(val & 0x7F);
+            /*
+             * Адрес меняем не сразу. По спецификации устройство обязано
+             * полностью завершить подтверждение ЭТОГО запроса на СТАРОМ
+             * адресе, и только потом перейти на новый. Если переключиться
+             * раньше, хост ждёт ответа по старому адресу, а мы уже
+             * отвечаем по новому — он объявляет «сбой задания адреса».
+             *
+             * Отсчитываем миллисекунду: подтверждение за это время
+             * гарантированно уходит, а спецификация даёт устройству
+             * на переход куда больше.
+             */
+            ep0_addr_deadline = read_cntpct() + read_cntfrq() / 1000;
+            mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
+            return;
+        case 0x09:
+            usb_configured = (val != 0);
+            if (usb_configured)
+                bulk_setup();
+            mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
+            return;
+        case 0x08: d = &val_one;  dlen = 1; break;
+        case 0x0A: d = &val_zero; dlen = 1; break;
+        }
+    } else if ((type & 0x60) == 0x20) {
+        /* Запросы класса порта: скорость, чётность, состояние линий.
+         * Провода нет, данные идут по USB, поэтому они нам безразличны.
+         * Но молча подтвердить обязаны, иначе система сочтёт порт
+         * неисправным и откажется его открывать. */
+        if (type & 0x80) {
+            d = line_coding; dlen = sizeof(line_coding);
+        } else if (len) {
+            /*
+             * У запроса есть стадия данных: следом придут ещё байты
+             * (например, семь байт параметров скорости). Подтверждаем
+             * только сам запрос, БЕЗ признака завершения — иначе хост
+             * увидит обрыв посылки и объявит устройство неисправным.
+             * Данные примет и выбросит общий обработчик ниже.
+             */
+            mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY);
+            return;
+        } else {
+            /* Данных нет — завершаем сразу */
+            mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
+            return;
+        }
+    }
+
+    if (!d) {
+        ep0_stall();
+        return;
+    }
+
+    if (dlen > len)
+        dlen = len;
+    ep0_tx = d;
+    ep0_tx_left = dlen;
+
+    mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY);
+    ep0_send_chunk();
+}
+
+/*
+ * Один шаг обслуживания нулевой точки.
+ *
+ * Вызывать почаще: пока мы не ответим, хост ждёт, а по истечении времени
+ * объявит устройство неисправным.
+ */
+static void usb_poll_locked(void)
+{
+    u16 csr;
+    u8 setup[8];
+
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
+    csr = mmio_read16(USB_BASE + MUSB_CSR0);
+
+    if (csr & CSR0_SETUPEND) {          /* хост оборвал посылку */
+        mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDSETUPEND);
+        ep0_tx_left = 0;
+        csr = mmio_read16(USB_BASE + MUSB_CSR0);
+    }
+
+    if (csr & CSR0_SENTSTALL)
+        mmio_write16(USB_BASE + MUSB_CSR0, 0);
+
+    if (csr & CSR0_RXPKTRDY) {
+        u8 n = mmio_read8(USB_BASE + MUSB_COUNT0);
+
+        if (n == 8) {
+            fifo_read(0, setup, 8);
+            ep0_setup(setup);
+        } else {
+            u8 junk;
+
+            for (u8 i = 0; i < n; i++)
+                fifo_read(0, &junk, 1);
+            mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
+        }
+        return;
+    }
+
+    if (ep0_tx_left && !(csr & CSR0_TXPKTRDY)) {
+        ep0_send_chunk();
+        return;
+    }
+
+    /* Подтверждение ушло по проводу — теперь можно перейти на новый адрес */
+    if (ep0_addr_pending && read_cntpct() >= ep0_addr_deadline &&
+        !(csr & CSR0_TXPKTRDY) && !ep0_tx_left) {
+        mmio_write8(USB_BASE + MUSB_FADDR, ep0_addr_pending);
+        ep0_addr_pending = 0;
+    }
+}
+
+/*
+ * Контроллером владеет только загрузочное ядро.
+ *
+ * Первая версия обслуживала USB откуда угодно, и это сломало запуск
+ * дополнительных ядер: они вызывают паузу при старте, пауза лезла в
+ * обслуживание, а обслуживание — в замок контроллера. Ядра дрались за
+ * него друг с другом ещё до того, как успевали подняться, и вместо
+ * восьми в системе оставалось два.
+ *
+ * У MUSB регистры конечных точек и так видны через одно окно, поэтому
+ * единственный владелец — не ограничение, а естественный порядок.
+ */
+void usb_poll(void)
+{
+    u64 flags;
+
+    if (cpu_id() != 0)
+        return;
+
+    flags = spin_lock_irq(&usb_lock);
+    usb_poll_locked();
+    spin_unlock_irq(&usb_lock, flags);
+}
+
+/* Отправить байты хосту. До перечисления молча ничего не делает. */
+static void usb_send_locked(const u8 *data, u32 len)
+{
+
+    while (len) {
+        u32 n = len > EP_BULK_MAXP ? EP_BULK_MAXP : len;
+        u32 spins = 0;
+
+        mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+        /* Пока ждём, продолжаем отвечать хосту: он в это время может
+         * прислать управляющий запрос, и молчание он не простит. */
+        while ((mmio_read16(USB_BASE + MUSB_TXCSR) & TXCSR_TXPKTRDY) &&
+               ++spins < 200000) {
+            mmio_write8(USB_BASE + MUSB_INDEX, 0);
+            usb_poll_locked();
+            mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+        }
+        if (spins >= 200000) {
+            /* Хост не забирает данные. Молча выбрасываем: зависнуть
+             * в выводе хуже, чем потерять строку. */
+            mmio_write8(USB_BASE + MUSB_INDEX, 0);
+            return;
+        }
+        fifo_write(EP_BULK, data, n);
+        mmio_write16(USB_BASE + MUSB_TXCSR, TXCSR_TXPKTRDY);
+        mmio_write8(USB_BASE + MUSB_INDEX, 0);
+
+        data += n;
+        len -= n;
+    }
+}
+
+void usb_send(const u8 *data, u32 len)
+{
+    u64 flags;
+
+    /* Печатать могут все ядра, но в контроллер лезет только загрузочное.
+     * Остальным строка просто не достаётся — на экране и в UART она
+     * всё равно останется. */
+    if (!usb_configured || cpu_id() != 0)
+        return;
+    flags = spin_lock_irq(&usb_lock);
+    usb_send_locked(data, len);
+    spin_unlock_irq(&usb_lock, flags);
+}
+
+int usb_ready(void) { return usb_configured; }
+
+/* ================== Консоль поверх USB ==================
+ *
+ * Посимвольная отправка была бы расточительной: каждый символ уходил бы
+ * отдельным пакетом. Поэтому копим строку и отдаём её целиком по переводу
+ * строки или когда буфер полон.
+ *
+ * Терминалы ждут пару «возврат каретки + перевод строки», поэтому возврат
+ * подставляем сами: внутри ядра строки заканчиваются одним переводом.
+ */
+static u8  con_buf[256];
+static u32 con_len;
+
+void usb_flush(void)
+{
+    if (!con_len)
+        return;
+    if (usb_configured)
+        usb_send(con_buf, con_len);
+    con_len = 0;
+}
+
+void usb_putc(char c)
+{
+    /* До перечисления копить бессмысленно: буфер переполнится задолго до
+     * того, как появится кому отдавать. */
+    if (!usb_configured)
+        return;
+
+    if (c == 10 && con_len < sizeof(con_buf))
+        con_buf[con_len++] = 13;
+    if (con_len < sizeof(con_buf))
+        con_buf[con_len++] = (u8)c;
+
+    if (c == 10 || con_len >= sizeof(con_buf) - 2)
+        usb_flush();
+}
+
 #else
 void usb_probe(void) { }
 void usb_connect(void) { }
 void usb_phy_probe(void) { }
 void usb_phy_on(void) { }
+void usb_poll(void) { }
+void usb_send(const u8 *d, u32 n) { (void)d; (void)n; }
+int  usb_ready(void) { return 0; }
+void usb_putc(char c) { (void)c; }
+void usb_flush(void) { }
 void usb_watch(u32 s) { (void)s; }
 #endif
