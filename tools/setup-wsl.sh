@@ -14,8 +14,10 @@ sudo apt-get install -y \
 echo "==> QEMU (наша песочница вместо телефона)"
 sudo apt-get install -y qemu-system-arm gdb-multiarch
 
+# В Ubuntu 24.04 пакеты называются adb и fastboot: старые android-tools-*
+# из репозитория убрали, и apt на них падал, обрывая скрипт через set -e.
 echo "==> Работа с Android: adb, fastboot, распаковка boot.img"
-sudo apt-get install -y android-sdk-libsparse-utils android-tools-adb android-tools-fastboot
+sudo apt-get install -y android-sdk-libsparse-utils adb fastboot
 sudo apt-get install -y device-tree-compiler   # dtc: читать DTB устройства
 sudo apt-get install -y python3-pip python3-venv
 
