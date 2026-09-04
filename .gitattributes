@@ -10,6 +10,7 @@ Makefile text eol=lf
 # А вот .bat читает cmd.exe, и ему нужен CRLF: с одними LF ломаются
 # переходы по меткам (goto), причём молча.
 *.bat  text eol=crlf
+*.ps1  text eol=crlf
 
 *.img  binary
 *.bin  binary
