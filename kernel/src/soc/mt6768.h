@@ -89,6 +89,36 @@
 #define OVL_L0_PITCH        0x0044          /* байт в строке                 */
 #define OVL_L0_ADDR         0x0F40          /* физический адрес буфера       */
 
+/* --- Выводы и прерывания от них ---
+ * СНЯТО С УСТРОЙСТВА: gpio@10005000, io_cfg_*@10002000.., apirq@1000b000.
+ * Выводов 186, pinctrl = mediatek,mt6768-pinctrl.
+ *
+ * Три разных блока, и путать их нельзя:
+ *   GPIO     направление, чтение и запись состояния вывода
+ *   IO_CFG   подтяжки и сила тока, восемь банков по 0x200
+ *   EINT     прерывания от выводов; именно сюда приходит сигнал тачскрина
+ */
+#define MT_GPIO_BASE        0x10005000UL
+#define MT_IOCFG_BASE       0x10002000UL    /* 8 банков по 0x200 */
+#define MT_IOCFG_BANKS      8
+#define MT_EINT_BASE        0x1000B000UL
+#define MT_GPIO_COUNT       186
+
+/* --- SPI ---
+ * Тачскрин сидит здесь: spi0@1100a000, узел novatek@0, cs 0, 8 МГц.
+ * Прерывание контроллера: SPI 0x8a => INTID 138 + 32 = 170. */
+#define MT_SPI0_BASE        0x1100A000UL
+#define MT_SPI2_BASE        0x11012000UL    /* сканер отпечатка */
+#define MT_SPI3_BASE        0x11013000UL    /* усилитель динамика cs35l41 */
+#define MT_SPI5_BASE        0x11015000UL
+
+/* Тачскрин Novatek NT36xxx (параметры из раздела dtbo официального ROM) */
+#define NVT_SPI_BASE        MT_SPI0_BASE
+#define NVT_SPI_CS          0
+#define NVT_SPI_HZ          8000000
+#define NVT_GPIO_RESET      92
+#define NVT_GPIO_IRQ        1
+
 /* --- Сторожевой таймер (TOPRGU) ---
  * СНЯТО С УСТРОЙСТВА: узел toprgu@10007000 в device tree.
  *
