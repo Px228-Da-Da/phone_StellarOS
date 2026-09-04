@@ -40,10 +40,13 @@ mkdir -p "$OUT"
 # и любой относительный путь после этого укажет не туда, куда ждёшь.
 OUT_ABS=$(cd "$OUT" && pwd)
 
-# mtkclient ждёт по одному имени файла на каждый раздел, в том же порядке
+# mtkclient ждёт ОБА списка через запятую — и разделы, и файлы, в одном
+# порядке. Пробел вместо запятой argparse считает лишними позиционными
+# аргументами и отказывается разбирать команду целиком.
 FILES=""
 for part in $(echo "$PARTS" | tr ',' ' '); do
-    FILES="$FILES $OUT_ABS/$part.img"
+    [ -n "$FILES" ] && FILES="$FILES,"
+    FILES="$FILES$OUT_ABS/$part.img"
 done
 
 echo "==> Жду телефон в режиме BROM (обе громкости + USB, экран чёрный)"
@@ -51,7 +54,7 @@ echo "    Читаю: $PARTS"
 echo "    Кладу в: $OUT_ABS"
 echo
 
-(cd "$MTK_DIR" && "$MTK_PY" mtk.py r "$PARTS" $FILES)
+(cd "$MTK_DIR" && "$MTK_PY" mtk.py r "$PARTS" "$FILES")
 
 OUT="$OUT_ABS"
 echo
