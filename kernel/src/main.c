@@ -441,6 +441,63 @@ static void touch_power_on_only(void)
 }
 
 /*
+ * Проверка тачскрина: рисуем там, где палец.
+ *
+ * Опрашиваем контроллер по линии прерывания. Она активна низким уровнем:
+ * пока сообщать нечего, микросхема держит её поднятой, и лезть на шину
+ * незачем. Так мы и узнаём, что данные готовы, не тратя шину впустую.
+ */
+static void touch_demo(u32 seconds)
+{
+#if defined(BOARD_MERLIN)
+    struct nvt_touch t[10];
+    u64 end = read_cntpct() + read_cntfrq() * seconds;
+    u64 next_report = 0;
+    u32 events = 0;
+
+    fb_clear(COLOR_BLACK);
+    kprintf("ТАЧ: КАСАЙСЯ ЭКРАНА %u СЕК\n", seconds);
+
+    while (read_cntpct() < end) {
+        int n;
+
+        usb_poll();
+
+        if (gpio_read(NVT_GPIO_IRQ))    /* линия поднята — сообщать нечего */
+            continue;
+
+        n = nvt_get_touches(t, 10);
+        if (n <= 0)
+            continue;
+        events++;
+
+        for (int i = 0; i < n; i++) {
+            u32 half = 12;
+            u32 x = t[i].x > half ? t[i].x - half : 0;
+            u32 y = t[i].y > half ? t[i].y - half : 0;
+            /* Цвет по номеру пальца: сразу видно, что их различают */
+            static const u32 palette[5] = {
+                0xFF00FF00, 0xFFFF4040, 0xFF4080FF, 0xFFFFFF00, 0xFFFF00FF
+            };
+
+            fb_fill_rect(x, y, half * 2, half * 2, palette[t[i].id % 5]);
+        }
+
+        /* В консоль пишем не чаще пяти раз в секунду: иначе поток
+         * сообщений вытеснит всё остальное из кольца вывода. */
+        if (read_cntpct() >= next_report) {
+            next_report = read_cntpct() + read_cntfrq() / 5;
+            kprintf("ТАЧ: ПАЛЬЦЕВ %d, ПЕРВЫЙ #%u В %u,%u ШИРИНА %u\n",
+                    n, t[0].id, t[0].x, t[0].y, t[0].w);
+        }
+    }
+    kprintf("ТАЧ: СОБЫТИЙ ЗА %u СЕК: %u\n", seconds, events);
+#else
+    (void)seconds;
+#endif
+}
+
+/*
  * Включить питание тачскрина и разбудить его.
  *
  * Питание идёт от регулятора VLDO28 внутри PMIC — это выяснилось из
@@ -973,6 +1030,7 @@ void kmain(u64 dtb_phys)
     spi_clk_enable();
     spi_pins_setup();
     nvt_probe();
+    touch_demo(30);
 
     if (10 == HALT_AT_OR_ZERO)
         fb_flip_probe();
