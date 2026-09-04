@@ -20,6 +20,7 @@
 #include "spinlock.h"
 #include "fdt.h"
 #include "i2c.h"
+#include "gpio.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -153,6 +154,8 @@ static void fb_stride_test(void);
 static void fb_banding_test(void);
 static void i2c0_dump(void);
 static void i2c0_scan(void);
+static void gpio_check(void);
+static void touch_wake(void);
 
 /* Состояние демонстрационной задачи: у каждой своё, общего — только счётчики */
 struct worker {
@@ -386,6 +389,88 @@ static void test_pattern(void)
     for (u32 i = 0; i < ARRAY_SIZE(colors); i++)
         fb_fill_rect(i * (w / ARRAY_SIZE(colors)), h - 120,
                      w / ARRAY_SIZE(colors), 120, colors[i]);
+}
+
+/*
+ * Оживает ли тачскрин после снятия сброса.
+ *
+ * Проверка GPIO показала, что загрузчик держит вывод 92 в нуле, то есть
+ * контроллер тача выключен. У таких микросхем есть собственная прошивка,
+ * и после снятия сброса они обычно начинают сами дёргать линию прерывания
+ * при касании — ещё до того, как мы скажем им хоть слово по SPI.
+ *
+ * Если это так, то мы получим ввод, не написав ни строчки драйвера SPI.
+ * Экран красим по состоянию линии: смотреть на цвет проще, чем на числа,
+ * и видно мгновенно.
+ */
+static void touch_wake(void)
+{
+#if defined(BOARD_MERLIN)
+    u32 changes = 0;
+    int prev;
+    u64 deadline;
+
+    kprintf("ТАЧ: СНИМАЮ СБРОС (ВЫВОД %u)\n", NVT_GPIO_RESET);
+    gpio_set_dir(NVT_GPIO_RESET, GPIO_OUT);
+    gpio_write(NVT_GPIO_RESET, 0);      /* убедимся, что действительно в сбросе */
+    delay_ms(20);
+    gpio_write(NVT_GPIO_RESET, 1);      /* отпускаем */
+    delay_ms(200);                      /* даём прошивке контроллера подняться */
+
+    gpio_set_dir(NVT_GPIO_IRQ, GPIO_IN);
+    prev = gpio_read(NVT_GPIO_IRQ);
+    kprintf("ТАЧ: ЛИНИЯ ПРЕРЫВАНИЯ %d, КАСАЙСЯ ЭКРАНА\n", prev);
+
+    /* Полминуты следим за линией и красим экран по её состоянию */
+    deadline = read_cntpct() + read_cntfrq() * 30;
+    while (read_cntpct() < deadline) {
+        int now = gpio_read(NVT_GPIO_IRQ);
+
+        if (now != prev) {
+            changes++;
+            prev = now;
+            /* Линия у таких контроллеров активна нулём: 0 значит «есть что
+             * забрать», то есть палец на экране. */
+            fb_fill_rect(0, 0, 1080, 300, now ? COLOR_BLUE : COLOR_GREEN);
+        }
+    }
+
+    kprintf("ТАЧ: ЛИНИЯ МЕНЯЛАСЬ %u РАЗ\n", changes);
+#endif
+}
+
+/*
+ * Верна ли раскладка регистров GPIO.
+ *
+ * Проверяем не абстрактно, а по заведомо известным выводам: у тачскрина
+ * линия прерывания (вывод 1) обязана быть входом, а линия сброса
+ * (вывод 92) — выходом. Номера взяты из раздела dtbo официальной прошивки,
+ * сомнений в них нет. Значит если направления совпали, смещения угаданы
+ * верно, а если нет — раскладка неправильная, и писать в неё нельзя.
+ *
+ * Только чтение: ни одной записи, пока не убедимся.
+ */
+static void gpio_check(void)
+{
+#if defined(BOARD_MERLIN)
+    static const struct { u32 pin; const char *what; int want_dir; } pins[] = {
+        { NVT_GPIO_IRQ,   "ТАЧ ПРЕРЫВ", GPIO_IN  },
+        { NVT_GPIO_RESET, "ТАЧ СБРОС ", GPIO_OUT },
+    };
+
+    kprintf("GPIO БАЗА 0x%08lx\n", (u64)MT_GPIO_BASE);
+    for (u32 i = 0; i < ARRAY_SIZE(pins); i++) {
+        int dir  = gpio_get_dir(pins[i].pin);
+        int mode = gpio_get_mode(pins[i].pin);
+        int in   = gpio_read(pins[i].pin);
+        int out  = gpio_read_out(pins[i].pin);
+
+        kprintf("%s %3u: НАПР %s РЕЖИМ %d ВХОД %d ВЫХОД %d %s\n",
+                pins[i].what, pins[i].pin,
+                dir == GPIO_OUT ? "ВЫХ" : "ВХ ", mode, in, out,
+                dir == pins[i].want_dir ? "СОВПАЛО" : "НЕ СОВПАЛО");
+    }
+#endif
 }
 
 /*
@@ -739,7 +824,20 @@ void kmain(u64 dtb_phys)
         fb_clear(COLOR_BLACK);
         i2c0_scan();
     }
-    HALT_STAGE(14);                          /* замереть на чистом экране */
+    HALT_STAGE(14);
+
+    if (15 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        gpio_check();
+    }
+    HALT_STAGE(15);
+
+    if (16 == HALT_AT_OR_ZERO) {
+        fb_clear(COLOR_BLACK);
+        gpio_check();
+        touch_wake();
+    }
+    HALT_STAGE(16);                          /* замереть на чистом экране */
 
     fb_flip_demo();
     HALT_STAGE(9);                          /* замереть после демонстрации */
