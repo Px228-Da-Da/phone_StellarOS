@@ -77,6 +77,9 @@ static void user_trampoline(void *arg)
     enter_el0(entry, sp);
 }
 
+volatile u32 uspace_stage;
+const char *volatile uspace_who;
+
 s64 uspace_spawn(const char *name, const void *image, u64 size)
 {
     struct uproc *p;
@@ -91,16 +94,20 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
     code_pages = (u32)((size + PAGE_SIZE - 1) / PAGE_SIZE);
     code_bytes = (u64)code_pages * PAGE_SIZE;
 
+    uspace_who = name;
+    uspace_stage = 1;                   /* куча */
     p = kzalloc(sizeof(*p));
     if (!p)
         return -1;
 
+    uspace_stage = 2;                   /* адресное пространство */
     root = mmu_new_user_space();
     if (!root) {
         kprintf("EL0      : %s НЕ ЗАПУЩЕНА — НЕТ ПРОСТРАНСТВА\n", name);
         return -1;
     }
 
+    uspace_stage = 3;                   /* страницы */
     code  = pmm_alloc_pages(code_pages);
     stack = pmm_alloc_pages(USER_STACK_PAGES);
     if (!code || !stack) {
@@ -108,6 +115,7 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
         return -1;
     }
 
+    uspace_stage = 4;                   /* копирование */
     memcpy(code, image, size);
 
     /*
@@ -116,8 +124,10 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
      * по ядерному адресу: по пользовательскому трансляции ещё нет, да и
      * действует она только в чужом пространстве.
      */
+    uspace_stage = 5;                   /* согласование кэшей */
     mmu_sync_icache((u64)(uintptr_t)code, code_bytes);
 
+    uspace_stage = 6;                   /* отображение */
     if (mmu_map_user(root, USER_BASE, (u64)(uintptr_t)code, code_bytes,
                      MMU_USER_RX) != 0 ||
         mmu_map_user(root, USER_BASE + USER_STACK_OFF, (u64)(uintptr_t)stack,
@@ -130,12 +140,14 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
     /* Стек растёт вниз, поэтому начинаем с верхней границы его страниц */
     p->sp = USER_BASE + USER_STACK_OFF + USER_STACK_PAGES * PAGE_SIZE;
 
+    uspace_stage = 7;                   /* задача */
     t = task_create_space(name, user_trampoline, p, TASK_PRIO_NORMAL, root);
     if (!t) {
         kprintf("EL0      : %s НЕ ЗАПУЩЕНА — НЕТ МЕСТА ПОД ЗАДАЧУ\n", name);
         return -1;
     }
 
+    uspace_stage = 0;                   /* всё, никто не запускается */
     kprintf("EL0      : %s СОЗДАНА, ЗАДАЧА %lu, ПРОСТРАНСТВО %lu\n",
             name, task_id_of(t), root >> 48);
     return (s64)task_id_of(t);

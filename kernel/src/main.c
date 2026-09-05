@@ -1719,6 +1719,13 @@ static void heartbeat_task(void *arg)
         kprintf("         ПРОГРАММ ВЫТЕСНЕНО ПРЯМО В EL0: %lu\n",
                 el0_preempt_count());
 
+        /* Кто-то застрял в запуске программы — скажем, на каком шаге.
+         * Печатаем отсюда, а не оттуда: печать по шагам сдвигает
+         * тайминг, и зависание перестаёт воспроизводиться. */
+        if (uspace_stage)
+            kprintf("         ЗАПУСК %s ЗАСТРЯЛ НА ШАГЕ %u\n",
+                    uspace_who ? uspace_who : "?", uspace_stage);
+
         if (beat % 50 == 0)
             sched_dump();
 
