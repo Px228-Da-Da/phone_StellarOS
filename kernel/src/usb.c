@@ -641,27 +641,56 @@ void usb_poll(void)
     spin_unlock_irq(&usb_lock, flags);
 }
 
+/*
+ * До каких пор ждать хоста.
+ *
+ * Ожидание здесь идёт под замком USB и с запрещёнными прерываниями:
+ * пока мы ждём, это ядро не делает ничего, а остальные встают на замке,
+ * едва им понадобится что-нибудь напечатать. То есть цена ожидания —
+ * не «медленнее печать», а «система не отвечает».
+ *
+ * Раньше предел был в оборотах цикла — двести тысяч, — и это оказалось
+ * почти вечностью: закрытый на компьютере терминал перестаёт забирать
+ * данные, и телефон замирал целиком, пока кто-нибудь печатал. Теперь
+ * предел во времени и короткий, а после неудачи мы вообще не пытаемся
+ * отдавать ещё десятую долю секунды.
+ *
+ * Правило прежнее и записано было верно: зависнуть в выводе хуже, чем
+ * потерять строку. Не хватало только строгости в его исполнении.
+ */
+#define TX_WAIT_MS      2
+#define TX_BACKOFF_MS   100
+
+static u64 tx_stalled_until;
+
 /* Отправить байты хосту. До перечисления молча ничего не делает. */
 static void usb_send_locked(const u8 *data, u32 len)
 {
 
     while (len) {
         u32 n = len > EP_BULK_MAXP ? EP_BULK_MAXP : len;
-        u32 spins = 0;
+        u64 deadline = read_cntpct() + read_cntfrq() * TX_WAIT_MS / 1000;
+        int late = 0;
 
         mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
         /* Пока ждём, продолжаем отвечать хосту: он в это время может
          * прислать управляющий запрос, и молчание он не простит. */
-        while ((mmio_read16(USB_BASE + MUSB_TXCSR) & TXCSR_TXPKTRDY) &&
-               ++spins < 200000) {
+        while (mmio_read16(USB_BASE + MUSB_TXCSR) & TXCSR_TXPKTRDY) {
+            if (read_cntpct() > deadline) {
+                late = 1;
+                break;
+            }
             mmio_write8(USB_BASE + MUSB_INDEX, 0);
             usb_poll_locked();
             mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
         }
-        if (spins >= 200000) {
-            /* Хост не забирает данные. Молча выбрасываем: зависнуть
-             * в выводе хуже, чем потерять строку. */
+        if (late) {
+            /* Хост не забирает данные. Молча выбрасываем и какое-то
+             * время даже не пробуем: каждая попытка стоит остановки
+             * всех ядер, которым нужно печатать. */
             mmio_write8(USB_BASE + MUSB_INDEX, 0);
+            tx_stalled_until = read_cntpct() +
+                               read_cntfrq() * TX_BACKOFF_MS / 1000;
             return;
         }
         fifo_write(EP_BULK, data, n);
@@ -741,7 +770,21 @@ static void ring_drain_locked(void)
 {
     u8 buf[64];
 
-    while (ring_tail != ring_head) {
+    /* Хост недавно не забрал пакет — не тратим на него время вовсе */
+    if (tx_stalled_until && read_cntpct() < tx_stalled_until)
+        return;
+    tx_stalled_until = 0;
+
+    /*
+     * За один раз отдаём не больше восьми пакетов.
+     *
+     * Отдача идёт под замком и с закрытыми прерываниями, а кольцо — это
+     * шестнадцать килобайт. Вычерпать его целиком означало бы удержать
+     * все ядра на время двухсот пятидесяти посылок. Отдача вызывается по
+     * тику, сто раз в секунду: восьми пакетов за раз хватает на
+     * пятьдесят килобайт в секунду, а это больше, чем мы печатаем.
+     */
+    for (u32 packet = 0; packet < 8 && ring_tail != ring_head; packet++) {
         u32 n = 0;
 
         while (n < sizeof(buf) && ring_tail != ring_head) {
@@ -749,6 +792,9 @@ static void ring_drain_locked(void)
             ring_tail = (ring_tail + 1) & (CON_RING - 1);
         }
         usb_send_locked(buf, n);
+
+        if (tx_stalled_until)   /* хост отвалился — дальше не пытаемся */
+            return;
     }
 }
 
