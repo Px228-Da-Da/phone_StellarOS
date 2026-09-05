@@ -745,6 +745,21 @@ void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
     }
 }
 
+void fb_panic_text(u32 line, const char *s)
+{
+    if (!fb.ready || !s)
+        return;
+
+    for (u32 i = 0; i < 2; i++) {
+        u32 *buf = (u32 *)fb.buf[i];
+
+        if (!buf)
+            continue;
+        fb_text_to(buf, fb.stride_px, fb.width, fb.height,
+                   8, 8 + line * 24, 2, 0xFFFF3030, 0xFF000000, s);
+    }
+}
+
 void fb_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
     int opaque_bg = (bg >> 24) != 0;

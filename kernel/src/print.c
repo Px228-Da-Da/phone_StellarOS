@@ -1,5 +1,6 @@
 #include "print.h"
 #include "spinlock.h"
+#include "fb.h"
 #include "uart.h"
 #include "fb.h"
 #include "usb.h"
@@ -68,6 +69,28 @@ void spin_stuck(struct spinlock *l)
     kprintf("ЗАМОК    : %s НЕ ОТПУСКАЮТ, ДЕРЖИТ ЯДРО %lx, ЖДЁТ %lx\n",
             l->name ? l->name : "?", l->holder,
             read_mpidr() & 0x00FFFFFFUL);
+
+    /*
+     * И на экран.
+     *
+     * Консоль в такой момент может быть недоступна ровно потому же,
+     * почему мы сюда попали: её отдача тоже берёт замок. Экран — канал
+     * без замков и без процессора, картинку с него читает контроллер
+     * дисплея.
+     */
+    {
+        char buf[64];
+        u32 n = 0;
+        const char *name = l->name ? l->name : "?";
+        const char *head = "ЗАМОК: ";
+
+        while (*head && n < sizeof(buf) - 1)
+            buf[n++] = *head++;
+        while (*name && n < sizeof(buf) - 1)
+            buf[n++] = *name++;
+        buf[n] = 0;
+        fb_panic_text(0, buf);
+    }
 
     reporting = 0;
 }
