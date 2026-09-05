@@ -85,6 +85,18 @@ static inline s64 present(u32 x, u32 y)
     return sys(SYS_PRESENT, x, y, 0, 0, 0, 0);
 }
 
+/*
+ * Показать половину буфера окна: 0 — первую, 1 — вторую.
+ *
+ * Двойная буферизация: рисуем в ту, что сейчас не показывается, и
+ * просим показать её целиком. На экране не бывает наполовину
+ * нарисованного — переключение происходит между кадрами.
+ */
+static inline s64 flip(u32 half)
+{
+    return sys(SYS_FLIP, half, 0, 0, 0, 0, 0);
+}
+
 static inline s64 window_close(void)
 {
     return sys(SYS_CLOSE, 0, 0, 0, 0, 0, 0);

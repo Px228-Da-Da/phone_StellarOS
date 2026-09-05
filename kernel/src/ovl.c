@@ -251,6 +251,15 @@ int ovl_layer_color(u32 layer, u32 argb, u32 x, u32 y, u32 w, u32 h)
     return 0;
 }
 
+void ovl_layer_addr(u32 layer, const volatile void *buf)
+{
+    if (layer == 0 || layer >= OVL_LAYERS || !buf)
+        return;
+
+    mmio_write32(lreg(layer, OVL_L0_ADDR), (u32)(uintptr_t)buf);
+    dsb();
+}
+
 void ovl_layer_move(u32 layer, u32 x, u32 y)
 {
     u32 size;
@@ -301,6 +310,7 @@ int  ovl_layer_color(u32 l, u32 c, u32 x, u32 y, u32 w, u32 h)
     return -1;
 }
 void ovl_layer_move(u32 l, u32 x, u32 y) { (void)l; (void)x; (void)y; }
+void ovl_layer_addr(u32 l, const volatile void *b) { (void)l; (void)b; }
 void ovl_layer_alpha(u32 l, u32 a) { (void)l; (void)a; }
 void ovl_layer_off(u32 l) { (void)l; }
 void ovl_base_layer(int on) { (void)on; }

@@ -53,6 +53,8 @@
 
 struct window {
     u64  owner;             /* номер задачи; 0 — слот свободен      */
+    u64  half;              /* размер одной половины, байт          */
+    u32  shown;             /* какая половина показывается сейчас   */
     void *buf;              /* буфер, он же физический адрес        */
     u64  bytes;             /* сколько под него уже выделено        */
     u64  mapped;            /* сколько отображено программе         */
@@ -151,14 +153,17 @@ u64 window_open(u32 w, u32 h)
     win->owner = task;                  /* слот занят, дальше можно не спеша */
     spin_unlock_irq(&win_lock, flags);
 
-    buf = slot_buffer(win, (u64)w * h * 4);
+    /* Двойная буферизация: под окно берём вдвое больше, чем видно */
+    buf = slot_buffer(win, (u64)w * h * 4 * 2);
     if (!buf) {
         kprintf("ОКНО     : %s ПРОСИТ %ux%u, А ПАМЯТИ НЕТ\n", task_name(), w, h);
         win->owner = 0;
         return 0;
     }
 
-    memset(buf, 0, (u64)w * h * 4);
+    memset(buf, 0, (u64)w * h * 4 * 2);
+    win->half = (u64)w * h * 4;
+    win->shown = 0;
     win->w = w;
     win->h = h;
     win->x = 0;
@@ -174,7 +179,7 @@ u64 window_open(u32 w, u32 h)
      * согласовать: писала бы программа через кэш, а контроллер читал
      * мимо него.
      */
-    win->mapped = ((u64)w * h * 4 + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    win->mapped = ((u64)w * h * 4 * 2 + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     if (mmu_map_user(task_space(), WINDOW_UVA, (u64)(uintptr_t)buf,
                      win->mapped, MMU_USER_FB) != 0) {
@@ -307,7 +312,8 @@ static int show_by_layer(struct window *win, u32 x, u32 y)
         }
 
         if (first) {
-            if (ovl_layer_set(layer, win->buf, x, y,
+            if (ovl_layer_set(layer, (u8 *)win->buf + (u64)win->shown * win->half,
+                              x, y,
                               win->w, win->h, win->w * 4, 255) != 0) {
                 irq_restore(flags);
                 layers_known = 1;   /* слоёв тут нет */
@@ -350,7 +356,8 @@ static int show_by_copy(struct window *win, u32 x, u32 y)
 {
     u64 base;
     u32 sw, sh, stride;
-    const u32 *src = win->buf;
+    const u32 *src = (const u32 *)((const u8 *)win->buf +
+                                   (u64)win->shown * win->half);
     u32 *dst;
 
     fb_info(&base, &sw, &sh, &stride);
@@ -427,9 +434,53 @@ int window_present(u32 x, u32 y)
     return rc;
 }
 
+/*
+ * Показать другую половину.
+ *
+ * Правим регистр слоя в промежутке между кадрами и с закрытыми
+ * прерываниями — по тому же правилу, что и всё остальное здесь: запись
+ * посреди вывода кадра видна на экране как разрыв. Три попытки; не
+ * сложилось — пишем как есть, потому что застрявший интерфейс хуже
+ * одного шва.
+ */
+int window_flip(u32 half)
+{
+    struct window *win = window_of(task_id());
+    void *addr;
+
+    if (!win || !win->buf || half > 1)
+        return -1;
+    if (win->layer < 0) {
+        /* Слоя нет — показываем копией, как и всё остальное */
+        win->shown = half;
+        return window_present(win->x, win->y);
+    }
+
+    addr = (u8 *)win->buf + (u64)half * win->half;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        u64 flags;
+
+        fb_wait_frame_gap();
+        flags = irq_save();
+        if (fb_frame_idle()) {
+            ovl_layer_addr(win->layer, addr);
+            irq_restore(flags);
+            win->shown = half;
+            return 0;
+        }
+        irq_restore(flags);
+    }
+
+    ovl_layer_addr(win->layer, addr);
+    win->shown = half;
+    return 0;
+}
+
 int window_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
     struct window *win = window_of(task_id());
+    u32 *buf;
 
     if (!win || !win->buf || !scale || scale > 8)
         return -1;
@@ -440,7 +491,9 @@ int window_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
      * лежит нужное. Непрозрачный закрашивает строку целиком за один
      * проход, и это единственный способ менять надпись без мигания.
      */
-    fb_text_to(win->buf, win->w, win->w, win->h, x, y, scale, fg, bg, s);
+    /* Пишем в НЕВИДИМУЮ половину: программа рисует туда же. */
+    buf = (u32 *)((u8 *)win->buf + (u64)(win->shown ^ 1) * win->half);
+    fb_text_to(buf, win->w, win->w, win->h, x, y, scale, fg, bg, s);
     return 0;
 }
 

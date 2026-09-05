@@ -278,6 +278,10 @@ static void syscall(struct trapframe *f)
                                      f->x[4], f->x[5]);
         return;
 
+    case SYS_FLIP:
+        f->x[0] = (u64)(s64)window_flip((u32)f->x[0]);
+        return;
+
     case SYS_CLOSE:
         f->x[0] = (u64)(s64)window_close();
         return;

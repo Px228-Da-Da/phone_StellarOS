@@ -34,7 +34,9 @@
 #define COL_DIM     0xFF5A6A88      /* второстепенное            */
 #define COL_WHITE   0xFFFFFFFF
 
-static u32 *win;
+static u32 *win;                    /* первая половина буфера    */
+static u32 *back;                   /* та, в которую рисуем      */
+static u32 half;                    /* какую сейчас показываем   */
 static u32 sw, sh;                  /* размеры экрана и окна     */
 static u32 tile_w;
 /* Без начальных значений: у программ для EL0 их не бывает вовсе — образ
@@ -89,8 +91,8 @@ static void draw_tile(u32 i)
     u32 body = ((int)i == pressed) ? COL_TILE_HL : COL_TILE;
 
     tile_rect(i, &x, &y);
-    urect(win, sw, x, y, tile_w, TILE_H, body);
-    uframe(win, sw, x, y, tile_w, TILE_H, 2, COL_EDGE);
+    urect(back, sw, x, y, tile_w, TILE_H, body);
+    uframe(back, sw, x, y, tile_w, TILE_H, 2, COL_EDGE);
     /* Подпись — с непрозрачным фоном плитки: один проход по тем же
      * пикселям вместо «стереть, потом написать». */
     text(x + 20, y + 22, 3, ((int)i == chosen) ? COL_WHITE : COL_TEXT,
@@ -140,9 +142,29 @@ static void draw_status(void)
     text(MARGIN + 260, y + 34, 2, COL_DIM, COL_BG, line);
 }
 
+/*
+ * Показать нарисованное.
+ *
+ * Рисуем всегда в ту половину, которая сейчас не видна, и переключаем
+ * показ целиком. Промежуточных состояний на экране не бывает вовсе —
+ * это и есть лечение мигания: контроллер дисплея не может застать нас
+ * за работой, потому что работаем мы не в той памяти, которую он
+ * читает.
+ *
+ * Полная перерисовка кадра стоит около пяти миллисекунд, и это дешевле,
+ * чем следить за тем, какой кусок изменился: пять миллисекунд раз в
+ * несколько десятых секунды не заметит никто.
+ */
+static void show(void)
+{
+    flip(half);
+    half ^= 1;
+    back = win + (u64)half * sw * sh;
+}
+
 static void draw_all(void)
 {
-    ufill(win, sw * sh, COL_BG);
+    ufill(back, sw * sh, COL_BG);
 
     text(MARGIN, 28, 6, COL_WHITE, 0, "VELO-OS");
     text(MARGIN, 92, 2, COL_DIM, 0, "ОБОЛОЧКА В ПОЛЬЗОВАТЕЛЬСКОМ РЕЖИМЕ");
@@ -177,6 +199,10 @@ void _start(void)
 
     tile_w = (sw - 2 * MARGIN - (COLS - 1) * GAP) / COLS;
 
+    /* Показывается первая половина, рисуем во вторую */
+    half = 1;
+    back = win + (u64)sw * sh;
+
     /*
      * Первый кадр меряем.
      *
@@ -189,6 +215,7 @@ void _start(void)
         u64 t0 = uptime_ms();
 
         draw_all();
+        show();
         ulabel(line, "EL0      : ОБОЛОЧКА: ПЕРВЫЙ КАДР, МС ", uptime_ms() - t0);
         line[ustrlen(line)] = 10;
         line[ustrlen(line)] = 0;
@@ -215,8 +242,10 @@ void _start(void)
         if (t.action == TOUCH_DOWN) {
             touches++;
             pressed = tile_at(t.x, t.y);
-            if (pressed >= 0)
-                draw_tile((u32)pressed);
+            if (pressed >= 0) {
+                draw_all();
+                show();
+            }
         } else if (t.action == TOUCH_MOVE) {
             /*
              * Увели палец с плитки — подсветку снимаем, но нажатие не
@@ -229,7 +258,8 @@ void _start(void)
                 int was = pressed;
 
                 pressed = -1;
-                draw_tile((u32)was);
+                draw_all();
+                show();
                 pressed = was;      /* помним, но не показываем */
             }
         } else {                    /* отпустили */
@@ -238,10 +268,10 @@ void _start(void)
             if (was >= 0 && tile_at(t.x, t.y) == was)
                 chosen = was;
             pressed = -1;
-            if (was >= 0)
-                draw_tile((u32)was);
-            if (chosen >= 0)
-                draw_tile((u32)chosen);
+            if (was >= 0) {
+                draw_all();
+                show();
+            }
         }
 
         /*
@@ -255,7 +285,8 @@ void _start(void)
             shown_touches = touches;
             shown_chosen = chosen;
             shown_sec = uptime_ms() / 1000;
-            draw_status();
+            draw_all();
+            show();
         }
         (void)last_sec;
     }
