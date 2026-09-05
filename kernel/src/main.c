@@ -893,7 +893,9 @@ static void fb_flip_probe(void)
  * Разбито на этапы с паузами: «слоя не видно» само по себе ничего не
  * объясняет, а вот какой именно из них не виден — объясняет многое.
  */
+#if defined(BOARD_MERLIN)
 static u32 *ovl_panel;                  /* содержимое подвижного слоя */
+#endif
 
 static void ovl_demo(void)
 {
@@ -1283,9 +1285,11 @@ void kmain(u64 dtb_phys)
             }
             kprintf("USB: ИТОГ — ЗАПРОСОВ %u, %s\n", usb_setup_count,
                     usb_ready() ? "ПЕРЕЧИСЛЕНЫ" : "НЕ ПЕРЕЧИСЛЕНЫ");
+#if defined(BOARD_MERLIN)
             kprintf("USB: FADDR %x POWER %x\n",
                     mmio_read8(MT_USB0_BASE + 0x00),
                     mmio_read8(MT_USB0_BASE + 0x01));
+#endif
         }
     }
     HALT_STAGE(19);                          /* замереть на чистом экране */

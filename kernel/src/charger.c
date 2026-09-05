@@ -173,9 +173,15 @@ void charger_dump(void)
             st.status4, st.status5);
 }
 
-#else
+#else   /* в эмуляторе контроллера заряда нет: питание там не кончается */
 
 int charger_probe(struct charger_state *st) { st->valid = 0; return -1; }
 void charger_dump(void) { }
+int  charger_use_apsd(void) { return -1; }
+
+/* Интерфейсу нужно что-то показать и без железа */
+const char *charger_stage_text(void) { return "НЕТ"; }
+const char *charger_port_text(void)  { return "-"; }
+u32  charger_input_ma(void) { return 0; }
 
 #endif
