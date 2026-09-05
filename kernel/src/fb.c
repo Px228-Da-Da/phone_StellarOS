@@ -230,6 +230,20 @@ int fb_wait_frame_gap(void)
     return fb_wait_ovl(OVL_INT_FRAME_CPL);
 }
 
+/*
+ * Идёт ли прямо сейчас чтение кадра из памяти.
+ *
+ * Дождаться окна мало: оно длится около восьмидесяти пяти микросекунд, а
+ * между «окно наступило» и «регистр записан» задачу может вытеснить
+ * прерывание таймера. Поэтому перед самой записью спрашиваем оверлей
+ * ещё раз — этот бит показывает состояние, а не событие, и врать ему
+ * незачем.
+ */
+int fb_frame_idle(void)
+{
+    return !(mmio_read32(MT_DISP_OVL0_BASE + OVL_STA) & OVL_STA_RUN);
+}
+
 static void fb_present(void)
 {
     if (fb_wait_ovl(OVL_INT_FRAME_CPL))
@@ -348,6 +362,7 @@ static int fb_probe(void)
 /* В эмуляторе цепочки вывода нет, считать нечего */
 void fb_vsync_probe(void) { }
 int  fb_wait_frame_gap(void) { return 1; }
+int  fb_frame_idle(void) { return 1; }
 
 static void fb_present(void)
 {

@@ -15,7 +15,10 @@
 #include "fb.h"
 #include "ovl.h"
 #include "input.h"
+#include "battery.h"
+#include "charger.h"
 #include "sched.h"
+#include "spinlock.h"
 #include "timer.h"
 #include "pmm.h"
 #include "mmu.h"
@@ -156,6 +159,127 @@ static void draw_header(void)
     fb_fill_rect(MARGIN, 360, scr_w - 2 * MARGIN, 2, UI_TILE_EDGE);
 }
 
+/*
+ * Батарея — отдельной строкой над плитками.
+ *
+ * Показываем и напряжение, и процент. Процент считается по кривой разряда
+ * этой батареи, но по напряжению без учёта нагрузки, поэтому под нагрузкой
+ * он занижен; напряжение же измерено точно, и по нему видно, растёт заряд
+ * или падает, даже когда процент стоит на месте.
+ */
+#define BATT_Y      (TILES_Y - 120)
+
+/*
+ * Куда идёт заряд.
+ *
+ * Признак «кабель подключён» отвечает не на тот вопрос. Кабель может быть
+ * воткнут, а телефон при этом всё равно разряжаться — если потребление
+ * больше, чем даёт зарядка. У нас именно такой случай возможен:
+ * контроллер заряда мы не настраиваем, а расход немаленький.
+ *
+ * Поэтому сравниваем напряжение с тем, что было полминуты назад. Порог в
+ * пять милливольт — чтобы шум измерения не выдавался за движение.
+ */
+static u32 batt_ref_mv;
+static u64 batt_ref_ms;
+static const char *batt_trend = "";
+
+static void update_trend(u32 mv)
+{
+    u64 now = timer_uptime_ms();
+
+    if (!batt_ref_ms) {
+        batt_ref_mv = mv;
+        batt_ref_ms = now;
+        return;
+    }
+    if (now - batt_ref_ms < 30000)
+        return;
+
+    if (mv > batt_ref_mv + 5)
+        batt_trend = " РАСТЁТ";
+    else if (mv + 5 < batt_ref_mv)
+        batt_trend = " ПАДАЕТ";
+    else
+        batt_trend = " СТОИТ";
+
+    batt_ref_mv = mv;
+    batt_ref_ms = now;
+}
+
+static void draw_battery(void)
+{
+    struct battery_state st;
+    char line[80];
+    char num[24];
+    u32 color;
+
+    battery_read(&st);
+    if (st.valid)
+        update_trend(st.mv);
+
+    fb_fill_rect(MARGIN, BATT_Y, scr_w - 2 * MARGIN, 70, UI_BG);
+
+    if (!st.valid) {
+        fb_text(MARGIN, BATT_Y + 12, 3, UI_DIM, UI_TRANSPARENT,
+                "БАТАРЕЯ: НЕ ОТВЕЧАЕТ");
+        return;
+    }
+
+    line[0] = 0;
+    str_cat(line, sizeof(line), st.charging ? "ЗАРЯД " : "БАТАРЕЯ ");
+    utoa(st.percent, num);
+    str_cat(line, sizeof(line), num);
+    str_cat(line, sizeof(line), "%  ");
+    utoa(st.mv, num);
+    str_cat(line, sizeof(line), num);
+    str_cat(line, sizeof(line), " МВ");
+    if (st.charging)
+        str_cat(line, sizeof(line), "  КАБЕЛЬ");
+    str_cat(line, sizeof(line), batt_trend);
+
+    /* Цветом отмечаем только то, что требует внимания: мало заряда. */
+    color = st.charging ? UI_ACCENT : (st.percent <= 15 ? 0xFFFF6B6B : UI_TEXT);
+    fb_text(MARGIN, BATT_Y + 12, 3, color, UI_TRANSPARENT, line);
+
+    /*
+     * Вторая строка — про сам зарядник.
+     *
+     * Нужна не для красоты: настоящая проверка заряда делается в розетке,
+     * а там USB-консоли нет и смотреть на числа можно только на экране.
+     * Тип источника контроллер распознаёт сам, и по нему сразу видно,
+     * во что упирается ток — в порт компьютера или в наше потребление.
+     */
+    if (st.charging) {
+        const char *stage = charger_stage_text();
+        u32 lim = charger_input_ma();
+
+        line[0] = 0;
+        str_cat(line, sizeof(line), charger_port_text());
+        str_cat(line, sizeof(line), ", ");
+        str_cat(line, sizeof(line), stage);
+        if (lim) {
+            str_cat(line, sizeof(line), ", ВХОД ");
+            utoa(lim, num);
+            str_cat(line, sizeof(line), num);
+            str_cat(line, sizeof(line), " МА");
+        }
+        fb_text(MARGIN, BATT_Y + 12 + 30, 2, UI_DIM, UI_TRANSPARENT, line);
+    }
+
+    /* В консоль — сырой код АЦП. Спорить о том, верен ли делитель, можно
+     * только имея на руках то, что вернуло железо, а не наш пересчёт. */
+    {
+        static u64 next_log;
+
+        if (timer_uptime_ms() >= next_log) {
+            next_log = timer_uptime_ms() + 10000;
+            kprintf("БАТАРЕЯ: КОД %u -> %u МВ, %u%%, КАБЕЛЬ %d%s\n",
+                    st.raw, st.mv, st.percent, st.charging, batt_trend);
+        }
+    }
+}
+
 /* Полоса под плитками: подробность о выбранной плитке */
 #define DETAIL_Y    (TILES_Y + ROWS * (TILE_H + GAP) + 30)
 #define DETAIL_H    170
@@ -207,6 +331,7 @@ static void draw_all(void)
 {
     fb_clear(UI_BG);
     draw_header();
+    draw_battery();
     for (int i = 0; i < TILE_COUNT; i++)
         draw_tile(i);
     draw_detail();
@@ -303,25 +428,10 @@ static void dot_hide(void)
     dot_want = 0;
 }
 
-/*
- * Применить накопленное.
- *
- * Ждём окно между кадрами один раз и только если есть что менять. Дальше
- * правим регистры: перемещение слоя — одна запись, и все правки
- * укладываются в окно с огромным запасом, оно около восьмидесяти пяти
- * микросекунд.
- */
-static void layers_commit(void)
+/* Собственно правка регистров. Вызывается уже внутри окна между кадрами
+ * и с закрытыми прерываниями — сама ничего не ждёт. */
+static void layers_apply(int hl_change, int dot_change)
 {
-    int hl_change  = (hl_want != hl_tile);
-    int dot_change = (dot_want != dot_on) ||
-                     (dot_want && (dot_wx != dot_x || dot_wy != dot_y));
-
-    if (!layers_ready || (!hl_change && !dot_change))
-        return;
-
-    fb_wait_frame_gap();
-
     if (hl_change) {
         if (hl_want < 0) {
             ovl_layer_off(1);
@@ -352,6 +462,48 @@ static void layers_commit(void)
         dot_x = dot_wx;
         dot_y = dot_wy;
     }
+}
+
+/*
+ * Применить накопленное — в окне между кадрами.
+ *
+ * Дождаться окна мало. Оно длится около восьмидесяти пяти микросекунд, а
+ * между «окно наступило» и «регистр записан» задачу успевает вытеснить
+ * прерывание таймера — оно приходит сто раз в секунду и заодно гоняет
+ * консоль по USB. Запись при этом ложится уже посреди вывода, и слой
+ * снова двоится. Именно так и оставалось после первой правки: реже, но
+ * оставалось.
+ *
+ * Поэтому три шага: дождаться окна с разрешёнными прерываниями, закрыть
+ * их, и уже с закрытыми переспросить оверлей — не начал ли он читать
+ * следующий кадр. Не успели — ждём следующего окна.
+ *
+ * Попыток три. Не сложилось за три кадра — пишем как есть: увиденный раз
+ * в жизни шов лучше, чем интерфейс, который перестал отвечать.
+ */
+static void layers_commit(void)
+{
+    int hl_change  = (hl_want != hl_tile);
+    int dot_change = (dot_want != dot_on) ||
+                     (dot_want && (dot_wx != dot_x || dot_wy != dot_y));
+
+    if (!layers_ready || (!hl_change && !dot_change))
+        return;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        u64 flags;
+
+        fb_wait_frame_gap();
+        flags = irq_save();
+        if (fb_frame_idle()) {
+            layers_apply(hl_change, dot_change);
+            irq_restore(flags);
+            return;
+        }
+        irq_restore(flags);
+    }
+
+    layers_apply(hl_change, dot_change);
 }
 
 /* --- Задача оболочки ---------------------------------------------- */
@@ -422,6 +574,10 @@ static void ui_task(void *arg)
         if (timer_uptime_ms() >= next_status) {
             next_status = timer_uptime_ms() + 1000;
             draw_status(touches);
+            /* Батарею опрашиваем тем же тактом. Измерение занимает около
+             * полутора миллисекунд — это дорого для каждого прохода, но
+             * раз в секунду незаметно. */
+            draw_battery();
         }
 
         /* Спим до следующей проверки очереди событий. Пять миллисекунд —
