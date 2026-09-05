@@ -1,4 +1,5 @@
 #include "print.h"
+#include "spinlock.h"
 #include "uart.h"
 #include "fb.h"
 #include "usb.h"
@@ -46,6 +47,29 @@ static void emit_str(const char *s)
 {
     while (*s)
         emit(*s++);
+}
+
+/*
+ * Замок не отпускают дольше разумного.
+ *
+ * Печатаем один раз на замок и не чаще: если встали намертво, поток
+ * сообщений не поможет, а вот забить кольцо консоли помешает разбору.
+ * Рекурсию отсекаем отдельно — сам вывод тоже берёт замок, и попытка
+ * пожаловаться на него же кончилась бы бесконечной жалобой.
+ */
+void spin_stuck(struct spinlock *l)
+{
+    static volatile u32 reporting;
+
+    if (reporting)
+        return;
+    reporting = 1;
+
+    kprintf("ЗАМОК    : %s НЕ ОТПУСКАЮТ, ДЕРЖИТ ЯДРО %lx, ЖДЁТ %lx\n",
+            l->name ? l->name : "?", l->holder,
+            read_mpidr() & 0x00FFFFFFUL);
+
+    reporting = 0;
 }
 
 void kputs(const char *s)
