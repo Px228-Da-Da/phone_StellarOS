@@ -1396,6 +1396,9 @@ void kmain(u64 dtb_phys)
      * а не опросом. */
     uspace_spawn_image(IMG_TRACK);
 
+    /* Панель — первое приложение: своё окно, свой текст, живые числа. */
+    uspace_spawn_image(IMG_PANEL);
+
     /* Сборщик и проверка того, что после него память возвращается */
     sched_start_reaper();
     task_create("перезапуск", respawn_task, NULL);

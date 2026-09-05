@@ -49,5 +49,7 @@ extern const u8 user_paint_start[];
 extern const u8 user_paint_end[];
 extern const u8 user_track_start[];
 extern const u8 user_track_end[];
+extern const u8 user_panel_start[];
+extern const u8 user_panel_end[];
 
 #endif

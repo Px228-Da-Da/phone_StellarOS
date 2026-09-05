@@ -44,6 +44,7 @@ struct window {
     u32  w, h;
     u32  x, y;
     int  on_layer;          /* показано слоем оверлея, а не копией  */
+    int  told_copy;         /* уже сказали, что идём копией         */
 };
 
 static struct spinlock win_lock = SPINLOCK_INIT("window");
@@ -134,6 +135,7 @@ u64 window_open(u32 w, u32 h)
     win->x = 0;
     win->y = 0;
     win->on_layer = 0;
+    win->told_copy = 0;
 
     /*
      * Отображаем буфер программе некэшируемым — тем же, чем он помечен у
@@ -252,8 +254,16 @@ int window_present(u32 x, u32 y)
         return -1;
 
     rc = show_by_layer(win, x, y);
-    if (rc != 0)
+    if (rc != 0) {
+        /* Сказать один раз: слой один на всех, и кто именно его занял —
+         * это то, чего иначе не видно ни в логе, ни на экране. */
+        if (!win->told_copy) {
+            kprintf("ОКНО     : %s ПОКАЗЫВАЕТСЯ КОПИЕЙ В КАДР, СЛОЙ ЗАНЯТ\n",
+                    task_name());
+            win->told_copy = 1;
+        }
         rc = show_by_copy(win, x, y);
+    }
 
     if (rc == 0) {
         win->x = x;
@@ -261,6 +271,20 @@ int window_present(u32 x, u32 y)
     }
 
     return rc;
+}
+
+int window_text(u32 x, u32 y, u32 scale, u32 fg, const char *s)
+{
+    struct window *win = window_of(task_id());
+
+    if (!win || !win->buf || !scale || scale > 8)
+        return -1;
+
+    /* Фон прозрачный: программа сама решает, чем заливать окно, и
+     * затирать её работу прямоугольником под каждой строкой мы не
+     * вправе. */
+    fb_text_to(win->buf, win->w, win->w, win->h, x, y, scale, fg, 0, s);
+    return 0;
 }
 
 void window_task_gone(u64 task, u64 ttbr0)

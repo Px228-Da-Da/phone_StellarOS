@@ -721,3 +721,220 @@ track_no_input_end:
 .align 4
 .global user_track_end
 user_track_end:
+
+/* ---------------------------------------------------------------------
+ * Девятая программа: панель.
+ *
+ * Первое настоящее приложение: своё окно, свой текст, живые числа,
+ * отклик на касания. Всё, что ей дало ядро, — буфер окна, шрифт и
+ * очередь касаний; остального она не видит.
+ *
+ * Числа она собирает сама: строки складываются на стеке, потому что
+ * страницы кода отображены только на чтение — писать в свои же данные
+ * программа не может, и это правильно.
+ */
+#define PNL_W       480
+#define PNL_H       200
+#define PNL_TOUCHES 40
+
+.align 4
+.global user_panel_start
+user_panel_start:
+    mov     x8, #SYS_WINDOW
+    mov     x0, #PNL_W
+    mov     x1, #PNL_H
+    svc     #0
+    cbz     x0, panel_nowin
+    mov     x19, x0                     /* буфер окна */
+
+    mov     x24, #0                     /* счётчик касаний */
+    mov     x25, #0                     /* x последнего касания */
+    mov     x26, #0                     /* y последнего касания */
+
+panel_draw:
+    /* Заливка окна: тёмный фон, чтобы текст читался */
+    movz    w0, #0x2030
+    movk    w0, #0xFF10, lsl #16
+    /* Число пикселей считаем умножением: 96000 одной командой в
+     * регистр не положить, а сомножители кладутся. */
+    mov     x1, #PNL_W
+    mov     x3, #PNL_H
+    mul     x1, x1, x3
+    mov     x2, x19
+panel_fill:
+    str     w0, [x2], #4
+    subs    x1, x1, #1
+    b.ne    panel_fill
+
+    /* Заголовок */
+    mov     x8, #SYS_TEXT
+    mov     x0, #16
+    mov     x1, #16
+    mov     x2, #3
+    movz    w3, #0xFFFF
+    movk    w3, #0xFF80, lsl #16
+    adr     x4, panel_title
+    mov     x5, #(panel_title_end - panel_title)
+    svc     #0
+
+    /* Строка «КАСАНИЙ: N» собирается на стеке */
+    sub     sp, sp, #64
+    mov     x20, sp
+    adr     x0, panel_touch_label
+    mov     x1, x20
+    mov     x2, #(panel_touch_label_end - panel_touch_label)
+    bl      panel_copy
+    mov     x0, x24
+    bl      panel_number
+    sub     x2, x1, x20                 /* длина получившейся строки */
+
+    mov     x8, #SYS_TEXT
+    mov     x5, x2
+    mov     x4, x20
+    mov     x0, #16
+    mov     x1, #70
+    mov     x2, #2
+    movz    w3, #0xFFFF
+    movk    w3, #0xFFFF, lsl #16
+    svc     #0
+    add     sp, sp, #64
+
+    /* Строка «ГДЕ: x,y» */
+    sub     sp, sp, #64
+    mov     x20, sp
+    adr     x0, panel_where_label
+    mov     x1, x20
+    mov     x2, #(panel_where_label_end - panel_where_label)
+    bl      panel_copy
+    mov     x0, x25
+    bl      panel_number
+    mov     x0, #44                     /* запятая */
+    strb    w0, [x1], #1
+    mov     x0, x26
+    bl      panel_number
+    sub     x2, x1, x20
+
+    mov     x8, #SYS_TEXT
+    mov     x5, x2
+    mov     x4, x20
+    mov     x0, #16
+    mov     x1, #120
+    mov     x2, #2
+    movz    w3, #0xC0FF
+    movk    w3, #0xFF60, lsl #16
+    svc     #0
+    add     sp, sp, #64
+
+    /* Показать окно там, где оно и было */
+    mov     x8, #SYS_PRESENT
+    mov     x0, #40
+    mov     x1, #900
+    svc     #0
+
+    /* Хватит ли касаний */
+    cmp     x24, #PNL_TOUCHES
+    b.ge    panel_done
+
+    /* Ждём следующее касание */
+    sub     sp, sp, #16
+    mov     x8, #SYS_INPUT
+    mov     x0, sp
+    svc     #0
+    tbnz    x0, #63, panel_noinput
+    ldrh    w25, [sp, #0]
+    ldrh    w26, [sp, #2]
+    add     sp, sp, #16
+    add     x24, x24, #1
+    b       panel_draw
+
+panel_done:
+    mov     x8, #SYS_WRITE
+    adr     x0, panel_bye
+    mov     x1, #(panel_bye_end - panel_bye)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #0
+    svc     #0
+    b       .
+
+panel_nowin:
+    mov     x8, #SYS_WRITE
+    adr     x0, panel_no_window
+    mov     x1, #(panel_no_window_end - panel_no_window)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #14
+    svc     #0
+    b       .
+
+panel_noinput:
+    add     sp, sp, #16
+    mov     x8, #SYS_EXIT
+    mov     x0, #15
+    svc     #0
+    b       .
+
+/*
+ * Скопировать x2 байт из x0 в x1. Возвращает конец в x1.
+ * Нужна потому, что писать строки можно только на стек: страницы кода
+ * отображены на чтение, и свои же данные программа не изменит.
+ */
+panel_copy:
+    cbz     x2, panel_copy_end
+1:  ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    x2, x2, #1
+    b.ne    1b
+panel_copy_end:
+    ret
+
+/*
+ * Число x0 десятичными цифрами по адресу x1. Возвращает конец в x1.
+ *
+ * Цифры получаются с конца — от младшей, — поэтому сначала складываем их
+ * в обратном порядке на стек, а потом переписываем. Делить приходится
+ * самим: умножения на обратное число у нас нет, а udiv есть.
+ */
+panel_number:
+    sub     sp, sp, #32
+    mov     x3, #10
+    add     x4, sp, #24                 /* пишем назад от этого места */
+    mov     x5, #0                      /* сколько цифр вышло */
+1:  udiv    x6, x0, x3
+    msub    x7, x6, x3, x0              /* остаток = x0 - (x0/10)*10 */
+    add     x7, x7, #48
+    sub     x4, x4, #1
+    strb    w7, [x4]
+    add     x5, x5, #1
+    mov     x0, x6
+    cbnz    x0, 1b
+2:  ldrb    w7, [x4], #1
+    strb    w7, [x1], #1
+    subs    x5, x5, #1
+    b.ne    2b
+    add     sp, sp, #32
+    ret
+
+panel_title:
+    .ascii  "ПАНЕЛЬ EL0\n"
+panel_title_end:
+
+panel_touch_label:
+    .ascii  "КАСАНИЙ: "
+panel_touch_label_end:
+
+panel_where_label:
+    .ascii  "ГДЕ: "
+panel_where_label_end:
+
+panel_bye:
+    .ascii  "EL0      : ПАНЕЛЬ: СОРОК КАСАНИЙ ПОКАЗАНО, УХОЖУ\n"
+panel_bye_end:
+
+panel_no_window:
+    .ascii  "EL0      : ПАНЕЛЬ: ОКНА НЕ ДАЛИ\n"
+panel_no_window_end:
+
+.align 4
+.global user_panel_end
+user_panel_end:

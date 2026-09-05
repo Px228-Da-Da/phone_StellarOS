@@ -22,6 +22,7 @@
 #include "uspace.h"
 #include "window.h"
 #include "input.h"
+#include "fb.h"
 
 /* Общий обработчик прерываний, main.c */
 void irq_handler(void);
@@ -193,6 +194,34 @@ static s64 sys_input(u64 uva)
     }
 }
 
+/*
+ * Написать в своём окне.
+ *
+ * Строка приходит из EL0, поэтому проверяется и копируется так же, как в
+ * выводе в консоль: длину ограничиваем, каждую страницу проверяем.
+ * Разница только в том, что здесь она попадёт не в консоль, а в буфер
+ * самой программы — но пройти по чужой памяти на пути к нему ядро может
+ * ровно так же.
+ */
+static s64 sys_text(u64 x, u64 y, u64 scale, u64 color, u64 uva, u64 len)
+{
+    char buf[128];
+
+    if (len > sizeof(buf) - 1)
+        len = sizeof(buf) - 1;
+    if (!len)
+        return 0;
+
+    if (copy_from_user(buf, uva, len) != 0) {
+        kprintf("EL0      : %s ПРОСИТ НАПИСАТЬ ЧУЖОЕ, АДРЕС %p\n",
+                task_name(), (void *)(uintptr_t)uva);
+        return -1;
+    }
+
+    buf[len] = 0;
+    return window_text((u32)x, (u32)y, (u32)scale, (u32)color, buf);
+}
+
 static void syscall(struct trapframe *f)
 {
     u64 nr = f->x[8];
@@ -232,6 +261,20 @@ static void syscall(struct trapframe *f)
     case SYS_PRESENT:
         f->x[0] = (u64)(s64)window_present((u32)f->x[0], (u32)f->x[1]);
         return;
+
+    case SYS_TEXT:
+        f->x[0] = (u64)(s64)sys_text(f->x[0], f->x[1], f->x[2], f->x[3],
+                                     f->x[4], f->x[5]);
+        return;
+
+    case SYS_SCREEN: {
+        u64 base;
+        u32 w, h, stride;
+
+        fb_info(&base, &w, &h, &stride);
+        f->x[0] = ((u64)w << 32) | h;
+        return;
+    }
 
     case SYS_INPUT:
         f->x[0] = (u64)sys_input(f->x[0]);

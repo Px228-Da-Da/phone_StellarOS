@@ -30,7 +30,10 @@
 #define SYS_WINDOW      8       /* x0,x1 — размер; вернёт адрес буфера    */
 #define SYS_PRESENT     9       /* x0,x1 — где показать окно              */
 #define SYS_INPUT       10      /* x0 — куда положить событие касания     */
-#define SYS_COUNT       11
+#define SYS_TEXT        11      /* x0,x1 — место; x2 — размер; x3 — цвет; */
+                                /* x4,x5 — строка и её длина              */
+#define SYS_SCREEN      12      /* размеры экрана: ширина<<32 | высота    */
+#define SYS_COUNT       13
 
 /*
  * Событие касания в том виде, в каком его получает EL0.
@@ -62,6 +65,7 @@
 #define IMG_BOSS        5
 #define IMG_PAINT       6
 #define IMG_TRACK       7
+#define IMG_PANEL       8
 
 /* Сколько байт за раз принимает SYS_WRITE. Ограничение обязательно:
  * длину задаёт программа, и без потолка она попросила бы ядро пройти

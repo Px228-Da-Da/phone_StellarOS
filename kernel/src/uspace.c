@@ -163,6 +163,7 @@ static const struct {
     { "запускала",  user_boss_start,  user_boss_end  },
     { "художник",   user_paint_start, user_paint_end },
     { "следопыт",   user_track_start, user_track_end },
+    { "панель",     user_panel_start, user_panel_end },
 };
 
 s64 uspace_spawn_image(u32 index)

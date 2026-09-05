@@ -688,6 +688,63 @@ u32 fb_text_width(u32 scale, const char *s)
     return n * 8 * scale;
 }
 
+/*
+ * Тот же знак, но в произвольный буфер.
+ *
+ * Отдельная функция, а не общий код с draw_glyph_ex: та знает про кадр,
+ * его ширину и его шаг строки, и обвешивать её проверками «а если буфер
+ * чужой» значило бы усложнить самый горячий путь вывода ради редкого.
+ */
+static void glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
+                         u32 cp, u32 px, u32 py, u32 scale,
+                         u32 fg, u32 bg, int opaque_bg)
+{
+    const u8 *glyph = glyph_for(cp);
+
+    for (u32 row = 0; row < 8; row++) {
+        u8 bits = glyph[row];
+
+        for (u32 col = 0; col < 8; col++) {
+            int on = (bits & (0x80 >> col)) != 0;
+
+            if (!on && !opaque_bg)
+                continue;
+            for (u32 sy = 0; sy < scale; sy++) {
+                u32 y = py + row * scale + sy;
+
+                if (y >= bh)
+                    return;
+                for (u32 sx = 0; sx < scale; sx++) {
+                    u32 x = px + col * scale + sx;
+
+                    if (x >= bw)
+                        break;
+                    buf[(u64)y * pitch_px + x] = on ? fg : bg;
+                }
+            }
+        }
+    }
+}
+
+void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
+                u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
+{
+    int opaque_bg = (bg >> 24) != 0;
+
+    if (!buf || !s || !scale)
+        return;
+
+    while (*s) {
+        u32 cp = utf8_next(&s);
+
+        if (x + 8 * scale > bw)
+            break;
+        glyph_to_buf(buf, pitch_px, bw, bh, cp, x, y, scale, fg, bg,
+                     opaque_bg);
+        x += 8 * scale;
+    }
+}
+
 void fb_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
     int opaque_bg = (bg >> 24) != 0;
