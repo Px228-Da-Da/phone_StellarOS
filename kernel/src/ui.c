@@ -73,6 +73,20 @@ static int pressed  = -1;           /* какая нажата прямо сей
 /* --- Слои: подсветка и точка под пальцем -------------------------- */
 #define DOT_SIZE    72
 static u32 *layer_hl;               /* подсветка плитки */
+/*
+ * Точка под пальцем.
+ *
+ * Своего слоя у неё больше нет: слоёв четыре, нулевой занят кадром,
+ * первый — подсветкой плитки, а два оставшихся отданы окнам программ.
+ * Ровно эту работу — показать, где палец, — теперь делает программа в
+ * EL0, и делает её там, где ей и место.
+ *
+ * Код точки оставлен целиком: он понадобится обратно в тот день, когда
+ * оболочка сама переедет в EL0 и станет такой же программой со своим
+ * окном.
+ */
+#define UI_DOT_LAYER    0           /* 0 — точку рисует не оболочка */
+
 static u32 *layer_dot;              /* точка под пальцем */
 static int  layers_ready;
 
@@ -420,8 +434,8 @@ static void layers_init(void)
     u64 span = 2UL * 1024 * 1024;
 
     layer_hl  = pmm_alloc_dma((u64)tile_w * TILE_H * 4);
-    layer_dot = pmm_alloc_dma(DOT_SIZE * DOT_SIZE * 4);
-    if (!layer_hl || !layer_dot) {
+    layer_dot = UI_DOT_LAYER ? pmm_alloc_dma(DOT_SIZE * DOT_SIZE * 4) : NULL;
+    if (!layer_hl || (UI_DOT_LAYER && !layer_dot)) {
         kprintf("UI: НЕТ ПАМЯТИ ПОД СЛОИ\n");
         return;
     }
@@ -614,11 +628,13 @@ static void ui_task(void *arg)
                 }
                 pressed = -1;
                 highlight(-1);
-                dot_hide();
+                if (UI_DOT_LAYER)
+                    dot_hide();
                 continue;
             }
 
-            dot_at(e.x, e.y);
+            if (UI_DOT_LAYER)
+                dot_at(e.x, e.y);
 
             if (e.action == TOUCH_DOWN) {
                 touches++;

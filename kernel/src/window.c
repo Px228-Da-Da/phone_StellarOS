@@ -35,15 +35,28 @@
  * пространства раздельные. Отступ от кода и стека — с запасом. */
 #define WINDOW_UVA      0x0000001000200000UL
 
-/* Слой оверлея под окно. Нулевой — кадр, первый и второй — оболочка. */
-#define WINDOW_LAYER    3
+/*
+ * Слои оверлея под окна.
+ *
+ * Их четыре. Нулевой занят основным кадром, первый — подсветкой плитки
+ * в оболочке, а второй и третий отданы окнам программ: точку под
+ * пальцем, ради которой оболочка держала второй, теперь рисует
+ * программа в EL0, и держать его дальше значило бы делать одну работу
+ * дважды.
+ *
+ * Два слоя — это два окна, которые видны без единого копирования
+ * пикселей. Третьему и следующим достаётся копирование в кадр.
+ */
+#define WINDOW_LAYER_FIRST  2
+#define WINDOW_LAYER_LAST   3
+#define OVL_LAYERS          4
 
 struct window {
     u64  owner;             /* номер задачи; 0 — слот свободен      */
     void *buf;              /* буфер, он же физический адрес        */
     u32  w, h;
     u32  x, y;
-    int  on_layer;          /* показано слоем оверлея, а не копией  */
+    int  layer;             /* номер занятого слоя или -1           */
     int  told_copy;         /* уже сказали, что идём копией         */
     u32  moves;             /* сколько раз переезжало по экрану     */
 };
@@ -51,15 +64,17 @@ struct window {
 static struct spinlock win_lock = SPINLOCK_INIT("window");
 static struct window windows[WINDOW_MAX];
 
+/* Кто какой слой занимает: индекс — номер слоя, значение — задача */
+static u64 layer_taken[OVL_LAYERS];
+
 /*
- * Кто сейчас занимает слой оверлея.
+ * Есть ли на этой плате слои вообще.
  *
- * Слой один, а окон может быть несколько. Первому пришедшему достаётся
- * аппаратная композиция, остальным — копирование в кадр: медленнее, но
- * работает. Без этого учёта второе окно просто перенастроило бы слой на
- * свой буфер, и первое исчезло бы с экрана без всякого объяснения.
+ * Выясняется первой же попыткой: в эмуляторе их нет, и там окна
+ * показываются копированием в кадр. Различать это важно не ради
+ * отчёта — от ответа зависит, показывать ли копией ПОДВИЖНОЕ окно.
  */
-static u64 layer_owner;
+static int layers_known, layers_exist;
 
 /*
  * Взять буфер под окно.
@@ -135,7 +150,7 @@ u64 window_open(u32 w, u32 h)
     win->h = h;
     win->x = 0;
     win->y = 0;
-    win->on_layer = 0;
+    win->layer = -1;
     win->told_copy = 0;
     win->moves = 0;
 
@@ -167,38 +182,46 @@ u64 window_open(u32 w, u32 h)
 /*
  * Кому достанется слой.
  *
- * Слой один, а окон несколько, и раздавать его по очереди прихода — не
- * то же самое, что раздавать по надобности. Неподвижному окну слой не
- * нужен: оно рисуется раз и остаётся на месте, копия в кадр обходится
- * ему в одну отрисовку. А окно, которое ездит за пальцем, копией
- * оставляет за собой след из своих прежних положений — там кадр никто
- * не восстанавливает.
+ * Слоёв два, окон может быть больше. Свободный берём сразу; если
+ * свободных нет, движущееся окно забирает слой у неподвижного.
+ * Неподвижному слой не нужен: оно рисуется раз и остаётся на месте,
+ * копия в кадр обходится ему в одну отрисовку. А окно, которое ездит за
+ * пальцем, копией оставляет за собой след из прежних положений — кадр
+ * там никто не восстанавливает.
  *
- * Поэтому правило простое: движущееся забирает слой у неподвижного.
- * Обратно — нет: иначе два подвижных окна отбирали бы слой друг у друга
- * на каждом кадре.
+ * Обратной замены нет: иначе два подвижных окна отбирали бы слой друг у
+ * друга на каждом кадре.
  */
-static struct window *layer_holder(void)
+static struct window *holder_of(int layer)
 {
     for (u32 i = 0; i < WINDOW_MAX; i++)
-        if (windows[i].owner && windows[i].owner == layer_owner)
+        if (windows[i].owner && windows[i].owner == layer_taken[layer])
             return &windows[i];
 
     return NULL;
 }
 
-static int may_take_layer(struct window *win)
+static int pick_layer(struct window *win)
 {
-    struct window *held;
+    if (win->layer >= 0)
+        return win->layer;
 
-    if (!layer_owner || layer_owner == win->owner)
-        return 1;
+    for (int l = WINDOW_LAYER_FIRST; l <= WINDOW_LAYER_LAST; l++)
+        if (!layer_taken[l])
+            return l;
 
-    held = layer_holder();
-    if (!held || held->moves || !win->moves)
-        return 0;               /* держит подвижное или мы сами стоим */
+    if (!win->moves)
+        return -1;              /* сами стоим — обойдёмся копией */
 
-    return 1;
+    for (int l = WINDOW_LAYER_FIRST; l <= WINDOW_LAYER_LAST; l++) {
+        struct window *held = holder_of(l);
+
+        if (!held || held->moves)
+            continue;
+        return l;               /* отберём у неподвижного */
+    }
+
+    return -1;
 }
 
 /*
@@ -208,26 +231,26 @@ static int may_take_layer(struct window *win)
  * слоёв нет вовсе, первое же окно объявляло бы слой занятым, а
  * остальные получали бы отказ и жалобу в лог на пустом месте.
  */
-static void claim_layer(struct window *win)
+static void claim_layer(struct window *win, int layer)
 {
-    struct window *held = layer_holder();
+    struct window *held = holder_of(layer);
 
-    if (held && held != win) {
-        held->on_layer = 0;     /* прежний владелец уходит на копию */
-        held->told_copy = 0;
-    }
+    if (held && held != win)
+        held->layer = -1;       /* прежний владелец уходит на копию */
 
-    layer_owner = win->owner;
+    layer_taken[layer] = win->owner;
+    win->layer = layer;
+    layers_known = 1;
+    layers_exist = 1;
 }
 
 static int show_by_layer(struct window *win, u32 x, u32 y)
 {
-    int first;
+    int layer = pick_layer(win);
+    int first = (win->layer < 0);
 
-    if (!may_take_layer(win))
-        return -1;              /* слой у того, кому он нужнее */
-
-    first = !win->on_layer;
+    if (layer < 0)
+        return -1;              /* слои у тех, кому они нужнее */
 
     for (int attempt = 0; attempt < 3; attempt++) {
         u64 flags;
@@ -240,29 +263,32 @@ static int show_by_layer(struct window *win, u32 x, u32 y)
         }
 
         if (first) {
-            if (ovl_layer_set(WINDOW_LAYER, win->buf, x, y,
+            if (ovl_layer_set(layer, win->buf, x, y,
                               win->w, win->h, win->w * 4, 255) != 0) {
                 irq_restore(flags);
+                layers_known = 1;   /* слоёв тут нет */
                 return -1;
             }
-            win->on_layer = 1;
-            claim_layer(win);
+            claim_layer(win, layer);
         } else {
-            ovl_layer_move(WINDOW_LAYER, x, y);
+            ovl_layer_move(layer, x, y);
         }
 
         irq_restore(flags);
         return 0;
     }
 
+    /* Три кадра подряд не поймали промежуток — пишем как есть. Увиденный
+     * раз в жизни шов лучше, чем программа, переставшая отвечать. */
     if (first) {
-        if (ovl_layer_set(WINDOW_LAYER, win->buf, x, y,
-                          win->w, win->h, win->w * 4, 255) != 0)
+        if (ovl_layer_set(layer, win->buf, x, y,
+                          win->w, win->h, win->w * 4, 255) != 0) {
+            layers_known = 1;
             return -1;
-        win->on_layer = 1;
-        claim_layer(win);
+        }
+        claim_layer(win, layer);
     } else {
-        ovl_layer_move(WINDOW_LAYER, x, y);
+        ovl_layer_move(layer, x, y);
     }
 
     return 0;
@@ -318,16 +344,32 @@ int window_present(u32 x, u32 y)
         win->moves++;
 
     rc = show_by_layer(win, x, y);
+
+    /*
+     * Копией показываем не всегда.
+     *
+     * Там, где слоёв нет, копия — единственный способ хоть что-то
+     * показать. Но там, где они есть и просто заняты, копией нельзя
+     * показывать ПОДВИЖНОЕ окно: за ним останется след из прежних
+     * положений, потому что кадр под ним никто не восстанавливает.
+     * Лучше не показать ничего и сказать об этом программе, чем
+     * измазать экран — тем более что слой освободится, как только
+     * сосед закончит.
+     */
     if (rc != 0) {
-        /* Сказать один раз: слой один на всех, и кто именно его занял —
-         * это то, чего иначе не видно ни в логе, ни на экране. */
+        if (layers_known && layers_exist && win->moves) {
+            if (!win->told_copy) {
+                kprintf("ОКНО     : %s ЖДЁТ СЛОЙ: ПОДВИЖНОЕ ОКНО КОПИЕЙ НЕ ПОКАЗЫВАЕМ\n",
+                        task_name());
+                win->told_copy = 1;
+            }
+            return -1;
+        }
+
         if (!win->told_copy) {
-            /* Причины две, и они разные: слой может быть занят соседом,
-             * а может не существовать вовсе — как в эмуляторе. Путать
-             * их в отчёте значит искать потом несуществующего соседа. */
             kprintf("ОКНО     : %s ПОКАЗЫВАЕТСЯ КОПИЕЙ В КАДР (%s)\n",
                     task_name(),
-                    layer_owner ? "СЛОЙ ЗАНЯТ" : "СЛОЁВ НЕТ");
+                    layers_exist ? "СЛОИ ЗАНЯТЫ" : "СЛОЁВ НЕТ");
             win->told_copy = 1;
         }
         rc = show_by_copy(win, x, y);
@@ -365,12 +407,14 @@ int window_text(u32 x, u32 y, u32 scale, u32 fg, const char *s)
  */
 static void window_release(struct window *win, u64 task)
 {
-    if (win->on_layer)
-        ovl_layer_off(WINDOW_LAYER);
-    if (layer_owner == task)
-        layer_owner = 0;        /* слой освободился для соседей */
+    (void)task;
 
-    win->on_layer = 0;
+    if (win->layer >= 0) {
+        ovl_layer_off(win->layer);
+        layer_taken[win->layer] = 0;
+        win->layer = -1;
+    }
+
     win->told_copy = 0;
     win->moves = 0;
     win->owner = 0;

@@ -731,14 +731,20 @@ track_y_ok:
     subs    x22, x22, #1
     b.ne    track_loop
 
+    /*
+     * Сорок касаний обслужено — говорим об этом и продолжаем.
+     *
+     * Раньше здесь программа завершалась, и это было ошибкой замысла:
+     * сорок событий при ведении пальцем набираются за один взмах, и
+     * окно исчезало через секунду после первого касания. Приложение,
+     * которое ждёт человека, живёт столько же, сколько система.
+     */
     mov     x8, #SYS_WRITE
     adr     x0, track_done
     mov     x1, #(track_done_end - track_done)
     svc     #0
-    mov     x8, #SYS_EXIT
-    mov     x0, #0
-    svc     #0
-    b       .
+    mov     x22, #40
+    b       track_loop
 
 track_nowin:
     mov     x8, #SYS_WRITE
@@ -762,7 +768,7 @@ track_noinput:
     b       .
 
 track_done:
-    .ascii  "EL0      : СЛЕДОПЫТ: ОТСЛЕДИЛ СОРОК КАСАНИЙ, УХОЖУ\n"
+    .ascii  "EL0      : СЛЕДОПЫТ: ЕЩЁ СОРОК КАСАНИЙ ОТСЛЕЖЕНО\n"
 track_done_end:
 
 track_no_window:
@@ -803,6 +809,7 @@ user_panel_start:
     mov     x19, x0                     /* буфер окна */
 
     mov     x24, #0                     /* счётчик касаний */
+    mov     x27, #PNL_TOUCHES           /* до следующего доклада */
     mov     x25, #0                     /* x последнего касания */
     mov     x26, #0                     /* y последнего касания */
 
@@ -886,9 +893,18 @@ panel_fill:
     mov     x1, #900
     svc     #0
 
-    /* Хватит ли касаний */
-    cmp     x24, #PNL_TOUCHES
-    b.ge    panel_done
+    /* Каждые сорок касаний — строка в консоль, и живём дальше:
+     * приложение, которое ждёт человека, не должно уходить само. */
+    subs    x27, x27, #1
+    b.ne    panel_keep
+
+    mov     x8, #SYS_WRITE
+    adr     x0, panel_bye
+    mov     x1, #(panel_bye_end - panel_bye)
+    svc     #0
+    mov     x27, #PNL_TOUCHES
+
+panel_keep:
 
     /* Ждём следующее касание */
     sub     sp, sp, #16
@@ -901,16 +917,6 @@ panel_fill:
     add     sp, sp, #16
     add     x24, x24, #1
     b       panel_draw
-
-panel_done:
-    mov     x8, #SYS_WRITE
-    adr     x0, panel_bye
-    mov     x1, #(panel_bye_end - panel_bye)
-    svc     #0
-    mov     x8, #SYS_EXIT
-    mov     x0, #0
-    svc     #0
-    b       .
 
 panel_nowin:
     mov     x8, #SYS_WRITE
@@ -983,7 +989,7 @@ panel_where_label:
 panel_where_label_end:
 
 panel_bye:
-    .ascii  "EL0      : ПАНЕЛЬ: СОРОК КАСАНИЙ ПОКАЗАНО, УХОЖУ\n"
+    .ascii  "EL0      : ПАНЕЛЬ: ЕЩЁ СОРОК КАСАНИЙ ПОКАЗАНО\n"
 panel_bye_end:
 
 panel_no_window:
