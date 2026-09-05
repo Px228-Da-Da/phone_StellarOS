@@ -379,11 +379,14 @@ static void ui_task(void *arg)
             draw_status(touches);
         }
 
-        schedule();     /* делать нечего — отдаём процессор */
+        /* Спим до следующей проверки очереди событий. Пять миллисекунд —
+         * половина периода опроса тачскрина: чаще смотреть незачем,
+         * реже — половина событий ждала бы лишний круг. */
+        task_sleep_ms(5);
     }
 }
 
 void ui_start(void)
 {
-    task_create("оболочка", ui_task, NULL);
+    task_create_prio("оболочка", ui_task, NULL, TASK_PRIO_UI);
 }

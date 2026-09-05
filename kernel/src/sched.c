@@ -17,6 +17,7 @@
 #include "spinlock.h"
 #include "kmalloc.h"
 #include "pmm.h"
+#include "timer.h"
 #include "print.h"
 #include "io.h"
 
@@ -27,6 +28,8 @@ struct task {
     u64 id;
     const char *name;
     u32 state;
+    u32 prio;                   /* больше — важнее, см. sched.h          */
+    u64 wake_ms;                /* когда будить, если спит               */
     u32 slice_used;             /* сколько тиков задача уже отработала   */
     u64 slices;                 /* сколько раз получала процессор        */
     u64 last_cpu;
@@ -56,18 +59,69 @@ static void rq_push(struct task *t)
     rq_tail = t;
 }
 
+/*
+ * Забрать самую важную из готовых.
+ *
+ * Раньше очередь была честно круговой: кто первый встал, тот и пошёл. Для
+ * счётных задач это правильно, а для интерфейса — нет. Оболочка отдаёт
+ * процессор сразу, как разобрала события, и уходит в конец очереди; пока
+ * десяток счётных задач выберут по кванту, проходит полсекунды, и нажатие
+ * срабатывает с заметной задержкой. Именно это и наблюдалось.
+ *
+ * Поэтому берём не первую, а самую приоритетную; среди равных —
+ * по-прежнему первую, то есть круговой порядок внутри уровня сохраняется
+ * и счётные задачи не голодают друг относительно друга.
+ */
 static struct task *rq_pop(void)
 {
-    struct task *t = rq_head;
+    struct task *best = NULL, *best_prev = NULL;
+    struct task *prev = NULL, *t = rq_head;
 
-    if (!t)
+    while (t) {
+        if (!best || t->prio > best->prio) {
+            best = t;
+            best_prev = prev;
+        }
+        prev = t;
+        t = t->next;
+    }
+
+    if (!best)
         return NULL;
 
-    rq_head = t->next;
-    if (!rq_head)
-        rq_tail = NULL;
-    t->next = NULL;
-    return t;
+    if (best_prev)
+        best_prev->next = best->next;
+    else
+        rq_head = best->next;
+    if (rq_tail == best)
+        rq_tail = best_prev;
+    best->next = NULL;
+    return best;
+}
+
+/*
+ * Разбудить тех, кому пора.
+ *
+ * Спящая задача не лежит в очереди готовых — иначе она получала бы
+ * процессор только чтобы тут же его вернуть. Она ждёт в общем списке, и
+ * сюда её возвращает время.
+ *
+ * Вызывается из schedule() под замком очереди. Отдельного таймера не
+ * нужно: schedule() и так вызывается на каждом кванте и на каждой
+ * уступке, а если работы нет вовсе — из холостого цикла по тику таймера.
+ */
+static void wake_sleepers(void)
+{
+    u64 now = timer_uptime_ms();
+
+    for (struct task *t = all_head; t; t = t->all_next) {
+        if (t->state != TASK_SLEEPING)
+            continue;
+        if (now < t->wake_ms)
+            continue;
+        t->state = TASK_READY;
+        rq_push(t);
+    }
 }
 
 void sched_init(void)
@@ -111,6 +165,12 @@ void sched_init_cpu(void)
 
 struct task *task_create(const char *name, task_fn fn, void *arg)
 {
+    return task_create_prio(name, fn, arg, TASK_PRIO_NORMAL);
+}
+
+struct task *task_create_prio(const char *name, task_fn fn, void *arg,
+                              u32 prio)
+{
     struct task *t = kzalloc(sizeof(*t));
     u8 *stack;
     u64 *frame;
@@ -125,6 +185,7 @@ struct task *task_create(const char *name, task_fn fn, void *arg)
     }
 
     t->name  = name;
+    t->prio  = prio;
     t->stack = stack;
     t->state = TASK_READY;
 
@@ -179,8 +240,11 @@ void schedule(void)
     c = this_cpu();
     prev = c->current;
 
+    wake_sleepers();
+
     /* idle в очередь не возвращаем: она принадлежит ядру, а не очереди,
-     * и попади она туда — другое ядро увело бы чужой загрузочный стек. */
+     * и попади она туда — другое ядро увело бы чужой загрузочный стек.
+     * Спящую тоже не возвращаем: её вернёт время, а не очередь. */
     if (prev && prev != c->idle && prev->state == TASK_RUNNING) {
         prev->state = TASK_READY;
         rq_push(prev);
@@ -240,6 +304,28 @@ void sched_tick(void)
 
     if (++t->slice_used >= TASK_SLICE_TICKS)
         c->resched = 1;
+}
+
+/*
+ * Уснуть на заданное время.
+ *
+ * Задача, которой нечего делать до срока, обязана спать, а не уступать
+ * процессор в пустом цикле. Уступка возвращает её в очередь готовых, и с
+ * приоритетом выше среднего она бы забрала всё процессорное время себе,
+ * ничего при этом не делая.
+ */
+void task_sleep_ms(u64 ms)
+{
+    struct cpu *c;
+    u64 flags = irq_save();
+
+    c = this_cpu();
+    if (c->current && c->current != c->idle) {
+        c->current->wake_ms = timer_uptime_ms() + ms;
+        c->current->state = TASK_SLEEPING;
+    }
+    irq_restore(flags);
+    schedule();
 }
 
 void task_exit(void)
