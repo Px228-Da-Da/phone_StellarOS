@@ -35,6 +35,11 @@ void pmm_reserve(u64 start, u64 size);
 void *pmm_alloc(void);
 void *pmm_alloc_pages(u32 count);
 
+/* Память под буферы для внешних блоков — контроллера дисплея и его слоёв.
+ * Выделяется целыми блоками по два мегабайта: некэшируемой память
+ * помечается блоками такого размера, и соседей в блоке быть не должно. */
+void *pmm_alloc_dma(u64 bytes);
+
 void  pmm_free(void *page);
 void  pmm_free_pages(void *page, u32 count);
 

@@ -10,4 +10,8 @@
 void kprintf(const char *fmt, ...);
 void kputs(const char *s);
 
+/* Дублировать ли вывод на экран. Выключается, когда кадр нужен под
+ * интерфейс: поверх бегущего текста рисовать нечего. */
+void kprint_to_fb(int on);
+
 #endif

@@ -131,12 +131,14 @@ int pmm_init(u64 ram_base, u64 ram_size, u64 dtb_phys)
     return 0;
 }
 
-void *pmm_alloc_pages(u32 count)
+static void *alloc_pages_aligned(u32 count, u32 align)
 {
     u64 flags;
 
     if (!count || !bitmap)
         return NULL;
+    if (!align)
+        align = 1;
 
     flags = spin_lock_irq(&pmm_lock);
 
@@ -149,6 +151,13 @@ void *pmm_alloc_pages(u32 count)
 
         while (i < limit) {
             u64 run = 0;
+
+            /* Выравнивание считаем по номеру страницы: начало памяти
+             * само лежит на границе блока, поэтому этого достаточно. */
+            if (i % align) {
+                i += align - (i % align);
+                continue;
+            }
 
             while (i + run < limit && run < count && !page_is_used(i + run))
                 run++;
@@ -179,6 +188,34 @@ void *pmm_alloc_pages(u32 count)
 
     spin_unlock_irq(&pmm_lock, flags);
     return NULL;
+}
+
+void *pmm_alloc_pages(u32 count)
+{
+    return alloc_pages_aligned(count, 1);
+}
+
+/*
+ * Память под буферы, которые читает не процессор, а внешний блок:
+ * контроллер дисплея, слои оверлея и всё, что ходит в память мимо кэшей.
+ *
+ * Такую память приходится помечать некэшируемой, а помечается она блоками
+ * по два мегабайта — округление внутри mmu_set_range_nc. Значит и выделять
+ * её надо целыми блоками по два мегабайта, иначе в тот же блок попадут
+ * соседние данные ядра и станут некэшируемыми вместе с буфером, а грязные
+ * строки кэша с их настоящим содержимым туда уже не доедут.
+ *
+ * Ровно так мы однажды разом уронили кучу, кольцо вывода и указатель на
+ * только что выделенный буфер: 600 килобайт под слой оверлея утащили за
+ * собой всё, что лежало в том же блоке.
+ */
+void *pmm_alloc_dma(u64 bytes)
+{
+    const u64 blk = 2UL * 1024 * 1024;
+    u64 rounded = (bytes + blk - 1) & ~(blk - 1);
+
+    return alloc_pages_aligned((u32)(rounded / PAGE_SIZE),
+                               (u32)(blk / PAGE_SIZE));
 }
 
 void *pmm_alloc(void)

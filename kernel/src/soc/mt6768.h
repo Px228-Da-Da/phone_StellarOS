@@ -89,6 +89,32 @@
 #define OVL_L0_PITCH        0x0044          /* байт в строке                 */
 #define OVL_L0_ADDR         0x0F40          /* физический адрес буфера       */
 
+/* --- Слои оверлея ---
+ * Раскладка из ddp_reg_ovl.h и ddp_ovl.c вендорного ядра.
+ * Слоёв четыре, все регистры слоя идут с шагом 0x20 — и настройки,
+ * и адрес буфера, и разрешение чтения из памяти.
+ */
+#define OVL_LAYER_STEP      0x20
+#define OVL_ROI_SIZE        0x0020          /* размер области вывода         */
+#define OVL_ROI_BGCLR       0x0028          /* цвет фона под всеми слоями    */
+#define OVL_SRC_CON         0x002C          /* по биту на слой: включён      */
+#define OVL_L0_CON          0x0030          /* формат, прозрачность, источник */
+#define OVL_L0_SRCKEY       0x0034
+#define OVL_L0_OFFSET       0x003C          /* [31:16]=y, [15:0]=x           */
+#define OVL_L0_TILE         0x0048
+#define OVL_L0_CLIP         0x004C
+#define OVL_RDMA0_CTRL      0x00C0          /* бит 0: слою разрешено читать  */
+#define OVL_L0_CLR          0x025C          /* цвет слоя-заливки, шаг 4      */
+
+/* Поля OVL_Ln_CON */
+#define OVL_CON_ALPHA_MASK  0xFFU           /* [7:0]   прозрачность слоя  */
+#define OVL_CON_AEN         (1U << 8)       /* учитывать прозрачность     */
+#define OVL_CON_CFMT_SHIFT  12              /* [15:12] формат пикселя     */
+#define OVL_CON_CFMT_MASK   (0xFU << 12)
+#define OVL_CON_BTSW        (1U << 24)      /* перестановка байт          */
+#define OVL_CON_LSRC_SHIFT  28              /* [29:28] 0 память, 1 цвет   */
+#define OVL_CON_LSRC_MASK   (0x3U << 28)
+
 /* --- Выводы и прерывания от них ---
  * СНЯТО С УСТРОЙСТВА: gpio@10005000, io_cfg_*@10002000.., apirq@1000b000.
  * Выводов 186, pinctrl = mediatek,mt6768-pinctrl.

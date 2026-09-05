@@ -225,6 +225,11 @@ static int fb_wait_ovl(u32 flag)
  * Замер на устройстве: все четыре признака приходят ровно 60 раз в
  * секунду, а занят OVL 99.5% времени — окно на подмену около 85 мкс.
  */
+int fb_wait_frame_gap(void)
+{
+    return fb_wait_ovl(OVL_INT_FRAME_CPL);
+}
+
 static void fb_present(void)
 {
     if (fb_wait_ovl(OVL_INT_FRAME_CPL))
@@ -342,6 +347,7 @@ static int fb_probe(void)
  */
 /* В эмуляторе цепочки вывода нет, считать нечего */
 void fb_vsync_probe(void) { }
+int  fb_wait_frame_gap(void) { return 1; }
 
 static void fb_present(void)
 {
@@ -432,13 +438,17 @@ int fb_double_buffer(int on)
             fb.buf[1] = fb.buf[0] + fb_frame_bytes() / 4;
             mmu_set_range_nc((u64)(uintptr_t)fb.buf[1], frame);
         } else {
-            u32 pages = (u32)((frame + PAGE_SIZE - 1) / PAGE_SIZE);
-            void *p = pmm_alloc_pages(pages);
+            /* Целыми блоками по два мегабайта: некэшируемой память
+             * помечается блоками такого размера, и соседей у буфера в
+             * блоке быть не должно — иначе данные ядра станут
+             * некэшируемыми вместе с ним. */
+            u64 span = (frame + 2UL * 1024 * 1024 - 1) & ~(2UL * 1024 * 1024 - 1);
+            void *p = pmm_alloc_dma(frame);
 
             if (!p)
                 return -1;
             /* Контроллер дисплея читает DRAM мимо кэшей процессора */
-            mmu_set_range_nc((u64)(uintptr_t)p, (u64)pages * PAGE_SIZE);
+            mmu_set_range_nc((u64)(uintptr_t)p, span);
             fb.buf[1] = (volatile u32 *)p;
         }
     }
