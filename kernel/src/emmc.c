@@ -131,12 +131,24 @@ static int looks_alive(u64 base, u32 words)
 #define SDC_STS_CMDBUSY     (1U << 1)
 
 #define FIFOCS_RXCNT(v)     ((v) & 0xFF)
+#define FIFOCS_CLR          (1U << 31)
 
 /* Собрать слово команды: длина блока, тип ответа и индекс */
 #define CMD_WORD(op, resp, dtype, rw, blklen) \
     (((blklen) << 16) | ((rw) << 13) | ((dtype) << 11) | ((resp) << 7) | (op))
 
 #define CMD_READ_SINGLE     CMD_WORD(17, 1, 1, 0, 512)
+
+/* Ждать обнуления битов маски. 0 — не дождались. */
+static int wait_until_zero(u64 reg, u32 mask, u32 ms)
+{
+    u64 deadline = read_cntpct() + read_cntfrq() * ms / 1000;
+
+    while (mmio_read32(reg) & mask)
+        if (read_cntpct() > deadline)
+            return 0;
+    return 1;
+}
 
 /* Ждать, пока условие станет истинным. 0 — не дождались. */
 static int wait_until(u64 reg, u32 mask, int set, u32 ms)
@@ -179,6 +191,21 @@ int emmc_read_block(u64 lba, void *dst)
         return -1;
     }
 
+    /*
+     * Очищаем очередь данных ПЕРЕД командой.
+     *
+     * В первом же дампе, снятом до всякого чтения, в MSDC_FIFOCS стояло
+     * 0000007c — сто двадцать четыре байта, оставшихся от загрузчика.
+     * Без очистки мы вычерпываем их и принимаем за свои: в отчёте
+     * появляются пятьсот двенадцать байт нулей и «передача не закрыта»,
+     * потому что настоящая передача при этом даже не начиналась.
+     */
+    mmio_write32(MSDC0_BASE + MSDC_FIFOCS, FIFOCS_CLR);
+    dsb();
+    if (!wait_until_zero(MSDC0_BASE + MSDC_FIFOCS, 0x00FF00FF, 50))
+        kprintf("EMMC     : ОЧЕРЕДЬ НЕ ОЧИСТИЛАСЬ, FIFOCS %08x\n",
+                mmio_read32(MSDC0_BASE + MSDC_FIFOCS));
+
     /* Сбрасываем накопленные признаки: иначе примем чужой за свой */
     mmio_write32(MSDC0_BASE + MSDC_INT, 0xFFFFFFFF);
     mmio_write32(MSDC0_BASE + SDC_BLK_NUM, 1);
@@ -200,6 +227,17 @@ int emmc_read_block(u64 lba, void *dst)
             kprintf("EMMC     : ОТВЕТ С ОШИБКОЙ, INT %08x\n", st);
             return -1;
         }
+
+        /*
+         * Что именно ответила карта. R1 — это её состояние: биты 12..9
+         * говорят, в каком она режиме, бит 8 — готова ли к данным.
+         * Если здесь осмысленный ответ, значит команда собрана верно, и
+         * искать расхождение надо дальше, в приёме данных.
+         */
+        kprintf("EMMC     : ОТВЕТ %08x, INT %08x, СОСТ %08x, ОЧЕРЕДЬ %08x\n",
+                mmio_read32(MSDC0_BASE + SDC_RESP0), st,
+                mmio_read32(MSDC0_BASE + SDC_STS),
+                mmio_read32(MSDC0_BASE + MSDC_FIFOCS));
     }
 
     /*
@@ -225,6 +263,10 @@ int emmc_read_block(u64 lba, void *dst)
             }
         }
     }
+
+    kprintf("EMMC     : ПРИНЯТО СЛОВ %u, INT %08x, ОЧЕРЕДЬ %08x\n",
+            got, mmio_read32(MSDC0_BASE + MSDC_INT),
+            mmio_read32(MSDC0_BASE + MSDC_FIFOCS));
 
     if (!wait_until(MSDC0_BASE + MSDC_INT, MSDC_INT_XFER_COMPL, 1, 200))
         kprintf("EMMC     : ДАННЫЕ ЕСТЬ, НО ПЕРЕДАЧА НЕ ЗАКРЫТА, INT %08x\n",
