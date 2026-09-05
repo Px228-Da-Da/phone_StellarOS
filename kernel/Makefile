@@ -60,8 +60,15 @@ CFLAGS := -MMD -MP -ffreestanding -nostdlib -nostartfiles -fno-builtin \
           -Wall -Wextra -Werror -std=gnu11 -O2 -g \
           -Iinclude -Isrc $(BOARD_DEF)
 
-ASFLAGS := $(CFLAGS)
+# Программы для EL0 собираются отдельно: свой скрипт компоновки, свой
+# адрес, никакой связи с ядром, кроме номеров системных вызовов. Готовый
+# образ вшивается в ядро (см. src/user.S), поэтому каталог сборки
+# добавлен в пути поиска ассемблера — .incbin ищет по ним же.
+ASFLAGS := $(CFLAGS) -I$(BUILD)
 LDFLAGS := -nostdlib -T linker.ld --defsym LOAD_ADDR=$(LOAD_ADDR)
+
+USER_SRCS := $(wildcard user/*.c)
+USER_BINS := $(patsubst user/%.c,$(BUILD)/user/%.bin,$(USER_SRCS))
 
 C_SRCS := $(wildcard src/*.c)
 S_SRCS := $(wildcard src/*.S)
@@ -78,6 +85,23 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 
 $(BUILD)/%.o: src/%.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
+
+# --- Программы для EL0 ---
+#
+# Линкуются по фиксированному адресу 0x1000000000 — ядро кладёт их ровно
+# туда. Заголовков в образе нет: только код и постоянные данные, всё
+# остальное программа получает от ядра.
+$(BUILD)/user:
+	@mkdir -p $(BUILD)/user
+
+$(BUILD)/user/%.elf: user/%.c user/user.ld | $(BUILD)/user
+	$(CC) $(CFLAGS) -Iuser -static -T user/user.ld -o $@ $<
+
+$(BUILD)/user/%.bin: $(BUILD)/user/%.elf
+	$(OBJCOPY) -O binary $< $@
+
+# user.S вшивает эти образы, поэтому пересобирается вместе с ними
+$(BUILD)/user.o: $(USER_BINS)
 
 $(BUILD)/kernel.elf: $(OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(OBJS) -o $@

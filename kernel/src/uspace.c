@@ -51,6 +51,8 @@ extern void enter_el0(u64 pc, u64 sp);
  * пустой кусок повыше: 64 ГБ при верхней границе в 512.
  */
 #define USER_BASE       0x0000001000000000UL
+#define USER_DATA_OFF   0x0000000000080000UL    /* изменяемые данные       */
+#define USER_DATA_PAGES  16                     /* 64 КБ, как в user.ld    */
 #define USER_STACK_OFF  0x0000000000100000UL    /* стек в мегабайте от кода */
 #define USER_STACK_PAGES 2
 
@@ -84,7 +86,7 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
 {
     struct uproc *p;
     struct task *t;
-    void *code, *stack;
+    void *code, *data, *stack;
     u64 root, code_bytes;
     u32 code_pages;
 
@@ -109,8 +111,9 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
 
     uspace_stage = 3;                   /* страницы */
     code  = pmm_alloc_pages(code_pages);
+    data  = pmm_alloc_pages(USER_DATA_PAGES);
     stack = pmm_alloc_pages(USER_STACK_PAGES);
-    if (!code || !stack) {
+    if (!code || !data || !stack) {
         kprintf("EL0      : %s НЕ ЗАПУЩЕНА — НЕТ ПАМЯТИ\n", name);
         return -1;
     }
@@ -128,8 +131,22 @@ s64 uspace_spawn(const char *name, const void *image, u64 size)
     mmu_sync_icache((u64)(uintptr_t)code, code_bytes);
 
     uspace_stage = 6;                   /* отображение */
+    /*
+     * Три области, и права у всех разные.
+     *
+     * Код — читать и исполнять: программа не должна мочь переписать
+     * саму себя, и это не предосторожность ради красоты, а то, что
+     * ловит половину ошибок с указателями сразу.
+     *
+     * Изменяемые данные — отдельно и только на чтение-запись. У программ
+     * на ассемблере их нет вовсе, а у программ на Си это .bss; область
+     * чистая, потому что инициализированных глобальных у нас не бывает
+     * (за этим следит компоновщик, см. user/user.ld).
+     */
     if (mmu_map_user(root, USER_BASE, (u64)(uintptr_t)code, code_bytes,
                      MMU_USER_RX) != 0 ||
+        mmu_map_user(root, USER_BASE + USER_DATA_OFF, (u64)(uintptr_t)data,
+                     USER_DATA_PAGES * PAGE_SIZE, MMU_USER_RW) != 0 ||
         mmu_map_user(root, USER_BASE + USER_STACK_OFF, (u64)(uintptr_t)stack,
                      USER_STACK_PAGES * PAGE_SIZE, MMU_USER_RW) != 0) {
         kprintf("EL0      : %s НЕ ЗАПУЩЕНА — НЕ ВЫШЛО ОТОБРАЗИТЬ\n", name);
@@ -176,6 +193,8 @@ static const struct {
     { "художник",   user_paint_start, user_paint_end },
     { "следопыт",   user_track_start, user_track_end },
     { "панель",     user_panel_start, user_panel_end },
+    { "привет-си",  user_hello_c_start, user_hello_c_end },
+    { "оболочка",   user_shell_start, user_shell_end },
 };
 
 s64 uspace_spawn_image(u32 index)

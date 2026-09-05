@@ -999,3 +999,30 @@ panel_no_window_end:
 .align 4
 .global user_panel_end
 user_panel_end:
+
+/* ---------------------------------------------------------------------
+ * Программы на Си.
+ *
+ * Собираются отдельно (см. Makefile и user/), а сюда попадают готовым
+ * образом. Ассемблер здесь остаётся только ради границ: ядру нужно
+ * знать, откуда и сколько копировать.
+ *
+ * Писать программы на ассемблере дальше смысла нет: те, что выше,
+ * проверяют по одной вещи каждая, а настоящее приложение — это работа с
+ * текстом, разбором касаний и раскладкой на экране.
+ */
+.align 4
+.global user_hello_c_start
+user_hello_c_start:
+    .incbin "user/hello.bin"
+.align 4
+.global user_hello_c_end
+user_hello_c_end:
+
+.align 4
+.global user_shell_start
+user_shell_start:
+    .incbin "user/shell.bin"
+.align 4
+.global user_shell_end
+user_shell_end:

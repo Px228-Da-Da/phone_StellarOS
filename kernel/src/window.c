@@ -54,6 +54,8 @@
 struct window {
     u64  owner;             /* номер задачи; 0 — слот свободен      */
     void *buf;              /* буфер, он же физический адрес        */
+    u64  bytes;             /* сколько под него уже выделено        */
+    u64  mapped;            /* сколько отображено программе         */
     u32  w, h;
     u32  x, y;
     int  layer;             /* номер занятого слоя или -1           */
@@ -83,18 +85,28 @@ static int layers_known, layers_exist;
  * аллокатору: они некэшируемые, а пометка эта односторонняя. Первый
  * запрос слот и заводит, дальше он просто переиспользуется.
  */
-static void *slot_buffer(struct window *win)
+static void *slot_buffer(struct window *win, u64 need)
 {
-    if (win->buf)
+    void *buf;
+
+    if (win->buf && win->bytes >= need)
         return win->buf;
 
-    win->buf = pmm_alloc_dma(WINDOW_BYTES);
-    if (!win->buf)
+    /*
+     * Нужно больше, чем есть. Старый буфер при этом не освобождаем:
+     * он некэшируемый, а такая пометка односторонняя — вернуть его в
+     * общий котёл значило бы раздать некэшируемую память под что
+     * попало. Слот просто вырастает и дальше держит больший буфер.
+     */
+    buf = pmm_alloc_dma(need);
+    if (!buf)
         return NULL;
 
     /* Читать эту память будет контроллер дисплея, мимо кэшей */
-    mmu_set_range_nc((u64)(uintptr_t)win->buf, WINDOW_BYTES);
-    return win->buf;
+    mmu_set_range_nc((u64)(uintptr_t)buf, need);
+    win->buf = buf;
+    win->bytes = need;
+    return buf;
 }
 
 static struct window *window_of(u64 task)
@@ -139,8 +151,9 @@ u64 window_open(u32 w, u32 h)
     win->owner = task;                  /* слот занят, дальше можно не спеша */
     spin_unlock_irq(&win_lock, flags);
 
-    buf = slot_buffer(win);
+    buf = slot_buffer(win, (u64)w * h * 4);
     if (!buf) {
+        kprintf("ОКНО     : %s ПРОСИТ %ux%u, А ПАМЯТИ НЕТ\n", task_name(), w, h);
         win->owner = 0;
         return 0;
     }
@@ -161,8 +174,10 @@ u64 window_open(u32 w, u32 h)
      * согласовать: писала бы программа через кэш, а контроллер читал
      * мимо него.
      */
+    win->mapped = ((u64)w * h * 4 + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
     if (mmu_map_user(task_space(), WINDOW_UVA, (u64)(uintptr_t)buf,
-                     WINDOW_BYTES, MMU_USER_FB) != 0) {
+                     win->mapped, MMU_USER_FB) != 0) {
         win->owner = 0;
         return 0;
     }
@@ -258,6 +273,18 @@ static int show_by_layer(struct window *win, u32 x, u32 y)
 
     if (layer < 0)
         return -1;              /* слои у тех, кому они нужнее */
+
+    /*
+     * Окно уже на слое и стоит там же — делать нечего.
+     *
+     * Содержимое окна контроллер дисплея читает сам и постоянно: чтобы
+     * показать нарисованное, ничего просить у ядра не нужно. Просьба
+     * имеет смысл, только когда окно переезжает или появляется впервые.
+     * Раньше мы всё равно ждали промежутка между кадрами — до шестнадцати
+     * миллисекунд на пустом месте.
+     */
+    if (!first && x == win->x && y == win->y)
+        return 0;
 
     for (int attempt = 0; attempt < 3; attempt++) {
         u64 flags;
@@ -424,6 +451,7 @@ static void window_release(struct window *win, u64 task)
 
     win->told_copy = 0;
     win->moves = 0;
+    win->mapped = 0;
     win->owner = 0;
 }
 
@@ -432,6 +460,7 @@ int window_close(void)
     u64 task = task_id();
     u64 space = task_space();
     struct window *win;
+    u64 mapped;
     u64 flags = spin_lock_irq(&win_lock);
 
     win = window_of(task);
@@ -440,14 +469,15 @@ int window_close(void)
         return -1;
     }
 
+    mapped = win->mapped;
     window_release(win, task);
     spin_unlock_irq(&win_lock, flags);
 
     /* Отображение снимаем последним: пока оно есть, программа ещё может
      * писать в буфер, который уже никому не показывается, — это лучше,
      * чем наоборот. */
-    if (space)
-        mmu_unmap_user(space, WINDOW_UVA, WINDOW_BYTES);
+    if (space && mapped)
+        mmu_unmap_user(space, WINDOW_UVA, mapped);
 
     return 0;
 }
@@ -455,6 +485,7 @@ int window_close(void)
 void window_task_gone(u64 task, u64 ttbr0)
 {
     struct window *win;
+    u64 mapped;
     u64 flags = spin_lock_irq(&win_lock);
 
     win = window_of(task);
@@ -463,6 +494,7 @@ void window_task_gone(u64 task, u64 ttbr0)
         return;
     }
 
+    mapped = win->mapped;
     window_release(win, task);
     spin_unlock_irq(&win_lock, flags);
 
@@ -472,6 +504,6 @@ void window_task_gone(u64 task, u64 ttbr0)
      * всё, что в нём отображено, — вместе с этим буфером, которому туда
      * нельзя: он некэшируемый навсегда.
      */
-    if (ttbr0)
-        mmu_unmap_user(ttbr0, WINDOW_UVA, WINDOW_BYTES);
+    if (ttbr0 && mapped)
+        mmu_unmap_user(ttbr0, WINDOW_UVA, mapped);
 }

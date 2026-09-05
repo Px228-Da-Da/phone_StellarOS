@@ -64,5 +64,9 @@ extern const u8 user_track_start[];
 extern const u8 user_track_end[];
 extern const u8 user_panel_start[];
 extern const u8 user_panel_end[];
+extern const u8 user_hello_c_start[];
+extern const u8 user_hello_c_end[];
+extern const u8 user_shell_start[];
+extern const u8 user_shell_end[];
 
 #endif
