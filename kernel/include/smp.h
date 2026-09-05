@@ -28,6 +28,7 @@ struct cpu {
     u64 ticks;                  /* прерываний таймера на этом ядре       */
     struct task *current;       /* что исполняется прямо сейчас          */
     struct task *idle;          /* чем занять ядро, когда работы нет     */
+    struct task *dying;         /* только что завершилась, стек ещё занят */
     volatile u32 resched;       /* пора вытеснить текущую задачу         */
     volatile u32 online;
 };

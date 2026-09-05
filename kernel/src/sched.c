@@ -48,6 +48,7 @@ static struct spinlock rq_lock = SPINLOCK_INIT("runqueue");
 static struct task *rq_head;
 static struct task *rq_tail;
 static struct task *all_head;
+static struct task *zombie_head;    /* отработали, ждут разбора          */
 static u64 next_id;
 static u64 task_count;
 
@@ -227,6 +228,49 @@ struct task *task_create_space(const char *name, task_fn fn, void *arg,
 }
 
 /*
+ * Принять завершившуюся задачу.
+ *
+ * Задача не может освободить себя сама: она стоит на своём стеке, и
+ * отдать его аллокатору означало бы вырвать пол из-под ног — причём не
+ * сразу, а когда эти страницы кто-нибудь займёт. Своё она отдать может
+ * только чужими руками.
+ *
+ * Эстафета такая: уходящая задача помечается умершей и записывается в
+ * поле ядра, а подобрать её обязана следующая — она уже исполняется на
+ * своём стеке, значит чужой свободен наверняка. Делается это под тем же
+ * замком очереди, который удерживается через переключение, поэтому
+ * промежутка, в котором задачу видно и уже можно тронуть, не возникает.
+ *
+ * Освобождает не подобравший: он лишь перекладывает задачу в список к
+ * сборщику. Освобождение — это работа с аллокаторами и таблицами
+ * страниц, а мы здесь под замком и с закрытыми прерываниями.
+ */
+static void take_dying(void)
+{
+    struct cpu *c = this_cpu();
+    struct task *d = c ? c->dying : NULL;
+
+    if (!d)
+        return;
+
+    c->dying = NULL;
+
+    /* Из общего списка убираем сразу: с этого момента задачи для системы
+     * не существует — ни в отчётах, ни в пробуждении спящих. */
+    for (struct task **pp = &all_head; *pp; pp = &(*pp)->all_next) {
+        if (*pp == d) {
+            *pp = d->all_next;
+            break;
+        }
+    }
+
+    d->all_next = zombie_head;
+    zombie_head = d;
+    if (task_count)
+        task_count--;
+}
+
+/*
  * Снять замок очереди уже в новом контексте.
  *
  * Вызывается ТОЛЬКО из task_start — из точки входа задачи, которая
@@ -235,6 +279,7 @@ struct task *task_create_space(const char *name, task_fn fn, void *arg,
  */
 void sched_after_switch(void)
 {
+    take_dying();
     spin_unlock(&rq_lock);
 }
 
@@ -280,6 +325,11 @@ void schedule(void)
     next->slices++;
     c->current = next;
 
+    /* Уходящая насовсем — оставляем следующей, пусть подберёт: сами мы
+     * стоим на том самом стеке, который надо отдать. */
+    if (prev->state == TASK_DONE && prev != c->idle)
+        c->dying = prev;
+
     /*
      * Смена адресного пространства.
      *
@@ -313,6 +363,7 @@ void schedule(void)
      * обработчика чужого таймера, проснулась бы с запрещёнными — и её ядро
      * больше никогда не получило бы ни одного прерывания.
      */
+    take_dying();
     spin_unlock(&rq_lock);
     irq_restore(flags);
 }
@@ -382,6 +433,57 @@ void sched_idle_loop(void)
         schedule();     /* появилась работа — уйдём на неё */
         wfi();          /* нет — спим до ближайшего прерывания */
     }
+}
+
+/*
+ * Сборщик: единственное место, где освобождается память задач.
+ *
+ * Работает обычной задачей, а не в планировщике, ровно по той причине,
+ * по которой задача не может освободить себя сама: здесь нужны
+ * аллокаторы и таблицы страниц, а планировщик держит замок очереди с
+ * закрытыми прерываниями.
+ *
+ * Порядок внутри задачи важен: сначала адресное пространство (в нём
+ * лежат страницы программы), потом стек ядра, потом сама структура.
+ */
+static void reap_one(struct task *t)
+{
+    if (t->ttbr0)
+        mmu_free_user_space(t->ttbr0);
+    if (t->stack)
+        pmm_free_pages(t->stack, TASK_STACK_PAGES);
+    kfree(t);
+}
+
+static void reaper_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        struct task *dead;
+        u64 flags = spin_lock_irq(&rq_lock);
+
+        dead = zombie_head;
+        zombie_head = NULL;
+        spin_unlock_irq(&rq_lock, flags);
+
+        while (dead) {
+            struct task *next = dead->all_next;
+
+            reap_one(dead);
+            dead = next;
+        }
+
+        /* Спешить некуда: пока никто не завершился, разбирать нечего,
+         * а просыпаться чаще, чем раз в четверть секунды, значит будить
+         * ядро ради пустого списка. */
+        task_sleep_ms(250);
+    }
+}
+
+void sched_start_reaper(void)
+{
+    task_create("сборщик", reaper_task, NULL);
 }
 
 u32 sched_task_count(void)

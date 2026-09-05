@@ -161,6 +161,7 @@ static void heartbeat_polling(void);
 static int  irq_works(void);
 static void mem_selftest(void);
 static void worker_task(void *arg);
+static void respawn_task(void *arg);
 static void memory_setup(u64 dtb_phys);
 static void fb_flip_demo(void);
 static void fb_flip_probe(void);
@@ -1389,6 +1390,10 @@ void kmain(u64 dtb_phys)
     uspace_spawn("двойник-2", user_twin_start,
                  (u64)(user_twin_end - user_twin_start));
 
+    /* Сборщик и проверка того, что после него память возвращается */
+    sched_start_reaper();
+    task_create("перезапуск", respawn_task, NULL);
+
     /* Ввод и оболочка. Порядок важен: оболочка сразу забирает экран у
      * отладочного вывода, поэтому запускаем её последней — всё, что
      * печаталось до этого, успевает лечь на экран и остаётся видимым,
@@ -1710,6 +1715,42 @@ static void heartbeat_task(void *arg)
 
         heartbeat_blink(beat);
     }
+}
+
+/*
+ * Проверка того, что память возвращается.
+ *
+ * Запускает десяток программ подряд и сравнивает занятость памяти до и
+ * после. Без сборщика каждая программа уносит с собой девять страниц —
+ * код, стек, три таблицы, корень — и число после заметно больше числа
+ * до. Со сборщиком они совпадают.
+ *
+ * Пауза в конце нужна не для красоты: сборщик просыпается раз в
+ * четверть секунды, и мерить сразу означало бы мерить его сон.
+ */
+#define RESPAWN_COUNT   12
+
+static void respawn_task(void *arg)
+{
+    u64 total, before, after;
+
+    (void)arg;
+
+    task_sleep_ms(4000);        /* дать отработать первым программам */
+    pmm_stats(&total, &before);
+    kprintf("EL0      : ЗАПУСКАЮ %u ПРОГРАММ ПОДРЯД, ЗАНЯТО СТРАНИЦ %lu\n",
+            RESPAWN_COUNT, before);
+
+    for (u32 i = 0; i < RESPAWN_COUNT; i++) {
+        uspace_spawn("разовая", user_once_start,
+                     (u64)(user_once_end - user_once_start));
+        task_sleep_ms(150);
+    }
+
+    task_sleep_ms(1500);
+    pmm_stats(&total, &after);
+    kprintf("EL0      : ОТРАБОТАЛИ ВСЕ. ЗАНЯТО СТРАНИЦ %lu, БЫЛО %lu\n",
+            after, before);
 }
 
 /* Запасной пульс: прерываний нет, значит нет ни задач, ни сна — только опрос */

@@ -65,12 +65,15 @@ struct uproc {
 static void user_trampoline(void *arg)
 {
     struct uproc *p = arg;
+    u64 entry = p->entry;
+    u64 sp = p->sp;
 
-    kprintf("EL0      : %s ПОШЛА, ВХОД %p, СТЕК %p\n",
-            task_name(), (void *)(uintptr_t)p->entry,
-            (void *)(uintptr_t)p->sp);
+    /* Описание больше не нужно: два числа из него уже у нас в регистрах,
+     * а обратно в эту функцию управление не вернётся — освободить его
+     * потом будет некому. */
+    kfree(p);
 
-    enter_el0(p->entry, p->sp);
+    enter_el0(entry, sp);
 }
 
 int uspace_spawn(const char *name, const void *image, u64 size)

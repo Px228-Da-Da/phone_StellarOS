@@ -30,5 +30,7 @@ extern const u8 user_spin_start[];
 extern const u8 user_spin_end[];
 extern const u8 user_twin_start[];
 extern const u8 user_twin_end[];
+extern const u8 user_once_start[];
+extern const u8 user_once_end[];
 
 #endif

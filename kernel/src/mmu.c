@@ -360,7 +360,57 @@ void mmu_sync_icache(u64 va, u64 size)
  * который уже кем-то занят: одинаковый ASID у двух разных таблиц — это
  * ровно та ошибка, ради предотвращения которой номера и заведены.
  */
-static volatile u64 next_asid;      /* atomic_inc вернёт уже увеличенное */
+/*
+ * Номера пространств выдаём из битовой карты, а не подряд.
+ *
+ * Подряд — значит одноразово: программы приходят и уходят, а номера
+ * кончаются, и на 256-й запуск система осталась бы без них. Номер
+ * освободившейся программы можно выдать снова, но только после того, как
+ * из TLB выгнаны её записи: иначе новая программа получит чужие
+ * отображения, помеченные тем же номером. Поэтому чистка TLB и возврат
+ * номера сделаны в одном месте и в этом порядке.
+ *
+ * Нулевой номер принадлежит ядру и не выдаётся никогда.
+ */
+#define ASID_COUNT  256
+
+static struct spinlock asid_lock = SPINLOCK_INIT("asid");
+static u64 asid_map[ASID_COUNT / 64] = { 1 };   /* нулевой сразу занят */
+
+static u64 asid_take(void)
+{
+    u64 flags = spin_lock_irq(&asid_lock);
+
+    for (u32 i = 0; i < ASID_COUNT; i++) {
+        if (asid_map[i / 64] & (1UL << (i % 64)))
+            continue;
+        asid_map[i / 64] |= 1UL << (i % 64);
+        spin_unlock_irq(&asid_lock, flags);
+        return i;
+    }
+
+    spin_unlock_irq(&asid_lock, flags);
+    return 0;                       /* свободных нет */
+}
+
+static void asid_give_back(u64 asid)
+{
+    u64 flags;
+
+    if (!asid || asid >= ASID_COUNT)
+        return;
+
+    /* Выгнать из TLB ВСЁ, что помечено этим номером, и только потом
+     * считать номер свободным. Широковещательно: программа успела
+     * побывать на всех восьми ядрах. */
+    __asm__ volatile("tlbi aside1is, %0" :: "r"(asid << 48) : "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    isb();
+
+    flags = spin_lock_irq(&asid_lock);
+    asid_map[asid / 64] &= ~(1UL << (asid % 64));
+    spin_unlock_irq(&asid_lock, flags);
+}
 
 u64 mmu_kernel_space(void)
 {
@@ -375,8 +425,8 @@ u64 mmu_new_user_space(void)
     if (!root)
         return 0;
 
-    asid = atomic_inc(&next_asid);      /* первый номер — 1, нулевой у ядра */
-    if (asid > 255) {
+    asid = asid_take();
+    if (!asid) {
         kprintf("MMU      : НОМЕРА АДРЕСНЫХ ПРОСТРАНСТВ КОНЧИЛИСЬ\n");
         pmm_free(root);
         return 0;
@@ -398,4 +448,65 @@ void mmu_switch(u64 ttbr0)
      */
     __asm__ volatile("msr ttbr0_el1, %0" :: "r"(ttbr0) : "memory");
     isb();
+}
+
+/*
+ * Освободить адресное пространство целиком.
+ *
+ * Обходим корень и разбираем всё, чего нет у ядра: сравнение с исходной
+ * таблицей — самый надёжный признак «это наше, не общее». Записи ядра
+ * указывают на общие таблицы второго уровня, тронуть их значило бы
+ * отобрать память у всех сразу.
+ *
+ * Вызывать можно только тогда, когда пространство точно не включено ни
+ * на одном ядре. Сборщик задач это обеспечивает: он разбирает задачу
+ * лишь после того, как на её ядре пошла следующая, а переключение задач
+ * всегда переключает и TTBR0.
+ */
+static void free_l3(u64 *l3)
+{
+    for (u32 i = 0; i < ENTRIES; i++) {
+        u64 e = l3[i];
+
+        if ((e & 3) == 3)               /* валидная страница */
+            pmm_free((void *)(uintptr_t)(e & 0x0000FFFFFFFFF000UL));
+    }
+    pmm_free(l3);
+}
+
+static void free_l2(u64 *l2)
+{
+    for (u32 i = 0; i < ENTRIES; i++) {
+        u64 e = l2[i];
+
+        /* Тройка в младших битах — таблица; единица была бы блоком на
+         * два мегабайта, но в пользовательских отображениях их нет. */
+        if ((e & 3) == 3)
+            free_l3((u64 *)(uintptr_t)(e & 0x0000FFFFFFFFF000UL));
+    }
+    pmm_free(l2);
+}
+
+void mmu_free_user_space(u64 ttbr0)
+{
+    u64 *root = (u64 *)(uintptr_t)(ttbr0 & 0x0000FFFFFFFFF000UL);
+    u64 asid = (ttbr0 >> 48) & 0xFF;
+
+    if (!root)
+        return;
+
+    /* Сначала TLB, потом память: страницу, на которую ещё может
+     * сослаться процессор, отдавать другой программе нельзя. */
+    asid_give_back(asid);
+
+    for (u32 i = 0; i < ENTRIES; i++) {
+        u64 e = root[i];
+
+        if (!(e & D_VALID) || e == l1_table[i])
+            continue;                   /* пусто или общее с ядром */
+        if ((e & 3) == 3)
+            free_l2((u64 *)(uintptr_t)(e & 0x0000FFFFFFFFF000UL));
+    }
+
+    pmm_free(root);
 }
