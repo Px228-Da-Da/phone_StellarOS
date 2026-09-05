@@ -46,7 +46,21 @@ static struct {
     struct input_event ring[SUB_RING];
 } subs[SUB_MAX];
 
-/* Разложить событие по очередям программ. Под общим замком ввода. */
+/*
+ * Разложить событие по очередям программ. Под общим замком ввода.
+ *
+ * Ведение пальцем складывается ОСОБЫМ образом: если в очереди последним
+ * лежит ещё не забранное «ведут», оно заменяется новым, а не копится.
+ *
+ * Причина в том, что ведение — это состояние, а не история. Программе
+ * нужно, где палец сейчас, а не где он побывал: показать окно она всё
+ * равно может не чаще кадра, а касания приходят сто раз в секунду. Без
+ * замены очередь набивается, и окно едет по адресам, которые палец
+ * прошёл секунду назад — то самое «идёт с задержкой».
+ *
+ * Нажатие и отпускание не заменяются никогда: их пропуск меняет смысл
+ * происходящего, а не точность.
+ */
 static void subs_push_locked(const struct input_event *e)
 {
     for (u32 i = 0; i < SUB_MAX; i++) {
@@ -54,6 +68,17 @@ static void subs_push_locked(const struct input_event *e)
 
         if (!subs[i].owner)
             continue;
+
+        if (e->action == TOUCH_MOVE && subs[i].head != subs[i].tail) {
+            u32 last = (subs[i].head - 1) & (SUB_RING - 1);
+
+            if (subs[i].ring[last].action == TOUCH_MOVE &&
+                subs[i].ring[last].id == e->id) {
+                subs[i].ring[last] = *e;
+                continue;
+            }
+        }
+
         next = (subs[i].head + 1) & (SUB_RING - 1);
         if (next == subs[i].tail) {
             input_dropped++;

@@ -715,6 +715,16 @@ u64 task_id(void)
     return (c && c->current) ? c->current->id : 0;
 }
 
+void task_set_prio(u32 prio)
+{
+    u64 flags = irq_save();
+    struct cpu *c = this_cpu();
+
+    if (c && c->current)
+        c->current->prio = prio;
+    irq_restore(flags);
+}
+
 u64 task_space(void)
 {
     struct cpu *c = this_cpu();
