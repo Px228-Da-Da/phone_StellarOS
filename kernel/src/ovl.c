@@ -112,6 +112,21 @@ static void ovl_enable(u32 layer, int on)
     dsb();
 }
 
+void ovl_take_over(void)
+{
+    u32 src_con = mmio_read32(MT_DISP_OVL0_BASE + OVL_SRC_CON);
+    u32 leftover = src_con & 0xE;       /* всё, кроме нулевого слоя */
+
+    if (!leftover)
+        return;
+
+    kprintf("OVL: УБИРАЮ СЛОИ ЗАГРУЗЧИКА, БЫЛО ВКЛЮЧЕНО %08x\n", src_con);
+    fb_wait_frame_gap();
+    for (u32 i = 1; i < OVL_LAYERS; i++)
+        if (leftover & (1U << i))
+            ovl_enable(i, 0);
+}
+
 void ovl_base_layer(int on)
 {
     fb_wait_frame_gap();
@@ -231,5 +246,6 @@ void ovl_layer_move(u32 l, u32 x, u32 y) { (void)l; (void)x; (void)y; }
 void ovl_layer_alpha(u32 l, u32 a) { (void)l; (void)a; }
 void ovl_layer_off(u32 l) { (void)l; }
 void ovl_base_layer(int on) { (void)on; }
+void ovl_take_over(void) { }
 
 #endif
