@@ -289,6 +289,13 @@ int mmu_map_user(u64 root, u64 va, u64 pa, u64 size, u32 kind)
         attr |= D_UXN;              /* исполнять можно только код     */
     if (kind == MMU_USER_RO)
         attr |= D_AP_RO;
+    if (kind == MMU_USER_FB) {
+        /* Память, которую читает не процессор: тип обязан совпадать с
+         * тем, которым она помечена у ядра, иначе одна и та же память
+         * оказывается кэшируемой с одной стороны и нет с другой. */
+        attr &= ~D_ATTRIDX(ATTR_NORMAL);
+        attr |= D_ATTRIDX(ATTR_NC);
+    }
 
     /* Выравниваем на страницу в обе стороны: отобразить половину
      * страницы нельзя, а молча отбросить хвост — значит оставить
@@ -485,6 +492,35 @@ static void free_l2(u64 *l2)
             free_l3((u64 *)(uintptr_t)(e & 0x0000FFFFFFFFF000UL));
     }
     pmm_free(l2);
+}
+
+void mmu_unmap_user(u64 root, u64 va, u64 size)
+{
+    u64 *l1 = (u64 *)(uintptr_t)(root & 0x0000FFFFFFFFF000UL);
+    u64 end = (va + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    if (!l1)
+        return;
+
+    for (va &= ~(PAGE_SIZE - 1); va < end; va += PAGE_SIZE) {
+        u64 e1 = l1[(va >> 30) & (ENTRIES - 1)];
+        u64 *l2, *l3;
+        u64 e2;
+
+        if ((e1 & 3) != 3)
+            continue;
+        l2 = (u64 *)(uintptr_t)(e1 & 0x0000FFFFFFFFF000UL);
+        e2 = l2[(va >> 21) & (ENTRIES - 1)];
+        if ((e2 & 3) != 3)
+            continue;
+        l3 = (u64 *)(uintptr_t)(e2 & 0x0000FFFFFFFFF000UL);
+        l3[(va >> 12) & (ENTRIES - 1)] = 0;
+    }
+
+    dsb();
+    __asm__ volatile("tlbi vmalle1is" ::: "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    isb();
 }
 
 void mmu_free_user_space(u64 ttbr0)

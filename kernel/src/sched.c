@@ -19,6 +19,7 @@
 #include "pmm.h"
 #include "timer.h"
 #include "mmu.h"
+#include "window.h"
 #include "print.h"
 #include "io.h"
 
@@ -141,11 +142,17 @@ static void wake_sleepers(void)
     u64 now = timer_uptime_ms();
 
     for (struct task *t = all_head; t; t = t->all_next) {
-        if (t->state != TASK_SLEEPING)
+        /* Ждущую по событию тоже будим по времени, если ей назначен
+         * срок: он для того и назначается, чтобы потерянное пробуждение
+         * стоило задержки, а не вечного сна. */
+        if (t->state != TASK_SLEEPING &&
+            !(t->state == TASK_WAITING && t->wake_ms))
             continue;
         if (now < t->wake_ms)
             continue;
         t->state = TASK_READY;
+        t->wait_chan = 0;
+        t->wake_ms = 0;
         rq_push(t);
     }
 }
@@ -500,8 +507,34 @@ static void wake_chan_locked(u64 chan)
             continue;
         t->state = TASK_READY;
         t->wait_chan = 0;
+        t->wake_ms = 0;
         rq_push(t);
     }
+}
+
+void sched_wait_timeout(u64 chan, u64 ms)
+{
+    u64 flags = irq_save();
+    struct cpu *c;
+
+    spin_lock(&rq_lock);
+    c = this_cpu();
+
+    if (c->current && c->current != c->idle) {
+        c->current->wait_chan = chan;
+        c->current->wake_ms = timer_uptime_ms() + ms;
+        c->current->state = TASK_WAITING;
+    }
+
+    schedule_locked(flags);
+}
+
+void sched_wake(u64 chan)
+{
+    u64 flags = spin_lock_irq(&rq_lock);
+
+    wake_chan_locked(chan);
+    spin_unlock_irq(&rq_lock, flags);
 }
 
 int sched_wait_for(u64 id, u64 *code)
@@ -621,6 +654,11 @@ void sched_idle_loop(void)
  */
 static void reap_one(struct task *t)
 {
+    /* Окно снимаем ДО разбора пространства: его буфер принадлежит ядру,
+     * а разборщик вернул бы его аллокатору как обычную страницу
+     * программы. */
+    window_task_gone(t->id, t->ttbr0);
+
     if (t->ttbr0)
         mmu_free_user_space(t->ttbr0);
     if (t->stack)
@@ -669,6 +707,13 @@ u64 task_id(void)
     struct cpu *c = this_cpu();
 
     return (c && c->current) ? c->current->id : 0;
+}
+
+u64 task_space(void)
+{
+    struct cpu *c = this_cpu();
+
+    return (c && c->current) ? c->current->ttbr0 : 0;
 }
 
 const char *task_name(void)

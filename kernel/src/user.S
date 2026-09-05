@@ -468,3 +468,256 @@ boss_nostart_end:
 .align 4
 .global user_boss_end
 user_boss_end:
+
+/* ---------------------------------------------------------------------
+ * Седьмая программа: художник.
+ *
+ * Первая, которая что-то показывает на экране сама. Просит у ядра окно,
+ * рисует в нём шахматку с рамкой — обычными записями в память, без
+ * единого обращения к ядру, — и просит показать окно в разных местах.
+ *
+ * Ни фреймбуфера, ни регистров контроллера дисплея ей при этом не видно.
+ * Всё, что у неё есть, — страницы буфера в её собственном пространстве.
+ */
+#define WIN_W   320
+#define WIN_H   240
+
+.align 4
+.global user_paint_start
+user_paint_start:
+    mov     x8, #SYS_WINDOW
+    mov     x0, #WIN_W
+    mov     x1, #WIN_H
+    svc     #0
+    cbz     x0, paint_nowin
+    mov     x19, x0                     /* адрес буфера окна */
+
+    /* Три цвета: две клетки шахматки и белая рамка. Формат — тот же
+     * 0xAARRGGBB, которым пользуется весь остальной вывод. */
+    movz    w25, #0x50C0
+    movk    w25, #0xFF20, lsl #16
+    movz    w26, #0xD0FF
+    movk    w26, #0xFF80, lsl #16
+    movz    w27, #0xFFFF
+    movk    w27, #0xFFFF, lsl #16
+
+    mov     x20, #0                     /* y */
+paint_row:
+    mov     x21, #0                     /* x */
+paint_col:
+    mov     x22, #WIN_W
+    mul     x22, x20, x22
+    add     x22, x22, x21
+    lsl     x22, x22, #2
+    add     x22, x19, x22               /* адрес пикселя */
+
+    cmp     x21, #3
+    b.le    paint_white
+    cmp     x20, #3
+    b.le    paint_white
+    mov     x23, #(WIN_W - 4)
+    cmp     x21, x23
+    b.ge    paint_white
+    mov     x23, #(WIN_H - 4)
+    cmp     x20, x23
+    b.ge    paint_white
+
+    lsr     x23, x21, #5                /* клетка 32 на 32 */
+    lsr     x24, x20, #5
+    add     x23, x23, x24
+    tbz     x23, #0, paint_light
+    str     w26, [x22]
+    b       paint_next
+paint_light:
+    str     w25, [x22]
+    b       paint_next
+paint_white:
+    str     w27, [x22]
+
+paint_next:
+    add     x21, x21, #1
+    cmp     x21, #WIN_W
+    b.lt    paint_col
+    add     x20, x20, #1
+    cmp     x20, #WIN_H
+    b.lt    paint_row
+
+    /* Нарисовано. Теперь показать — пять раз в разных местах экрана. */
+    mov     x21, #5
+    mov     x22, #60                    /* x */
+    mov     x23, #300                   /* y */
+
+paint_show:
+    mov     x8, #SYS_PRESENT
+    mov     x0, x22
+    mov     x1, x23
+    svc     #0
+    tbnz    x0, #63, paint_noshow
+
+    mov     x8, #SYS_SLEEP_MS
+    mov     x0, #500
+    svc     #0
+
+    add     x22, x22, #100
+    add     x23, x23, #250
+    subs    x21, x21, #1
+    b.ne    paint_show
+
+    mov     x8, #SYS_WRITE
+    adr     x0, paint_done
+    mov     x1, #(paint_done_end - paint_done)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #0
+    svc     #0
+    b       .
+
+paint_nowin:
+    mov     x8, #SYS_WRITE
+    adr     x0, paint_no_window
+    mov     x1, #(paint_no_window_end - paint_no_window)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #10
+    svc     #0
+    b       .
+
+paint_noshow:
+    mov     x8, #SYS_WRITE
+    adr     x0, paint_no_show
+    mov     x1, #(paint_no_show_end - paint_no_show)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #11
+    svc     #0
+    b       .
+
+paint_done:
+    .ascii  "EL0      : ХУДОЖНИК: НАРИСОВАЛ И ПОКАЗАЛ ПЯТЬ РАЗ\n"
+paint_done_end:
+
+paint_no_window:
+    .ascii  "EL0      : ХУДОЖНИК: ОКНА НЕ ДАЛИ\n"
+paint_no_window_end:
+
+paint_no_show:
+    .ascii  "EL0      : ХУДОЖНИК: ПОКАЗАТЬ ОКНО НЕ ВЫШЛО\n"
+paint_no_show_end:
+
+.align 4
+.global user_paint_end
+user_paint_end:
+
+/* ---------------------------------------------------------------------
+ * Восьмая программа: следопыт.
+ *
+ * Окно, которое ходит за пальцем. Первая программа, которая получает
+ * ввод: до неё касания разбирала только оболочка внутри ядра.
+ *
+ * Устройство простое до предела — ждать событие, переставить окно,
+ * повторить. Всё остальное делают ядро и контроллер дисплея: программа
+ * не рисует ни пикселя после первой заливки и не опрашивает ничего.
+ * Ожидание касания ей ничего не стоит: пока пальца нет, задача не
+ * получает процессор вовсе.
+ */
+#define TRK_SIZE    96
+#define TRK_HALF    48
+
+.align 4
+.global user_track_start
+user_track_start:
+    mov     x8, #SYS_WINDOW
+    mov     x0, #TRK_SIZE
+    mov     x1, #TRK_SIZE
+    svc     #0
+    cbz     x0, track_nowin
+    mov     x19, x0
+
+    /* Заливка одним цветом: следопыта видно и без узора */
+    movz    w25, #0x30A0
+    movk    w25, #0xFFF0, lsl #16
+    mov     x20, #(TRK_SIZE * TRK_SIZE)
+    mov     x21, x19
+track_fill:
+    str     w25, [x21], #4
+    subs    x20, x20, #1
+    b.ne    track_fill
+
+    mov     x22, #40                    /* столько касаний обслужим */
+
+track_loop:
+    sub     sp, sp, #16
+    mov     x8, #SYS_INPUT
+    mov     x0, sp
+    svc     #0
+    tbnz    x0, #63, track_noinput
+
+    ldrh    w20, [sp, #0]               /* x касания */
+    ldrh    w21, [sp, #2]               /* y касания */
+    add     sp, sp, #16
+
+    /* Окно ставим серединой под палец, не давая уйти за левый и
+     * верхний край: там координаты стали бы отрицательными, а ядро
+     * ждёт беззнаковые. */
+    subs    x20, x20, #TRK_HALF
+    b.ge    track_x_ok
+    mov     x20, #0
+track_x_ok:
+    subs    x21, x21, #TRK_HALF
+    b.ge    track_y_ok
+    mov     x21, #0
+track_y_ok:
+
+    mov     x8, #SYS_PRESENT
+    mov     x0, x20
+    mov     x1, x21
+    svc     #0
+
+    subs    x22, x22, #1
+    b.ne    track_loop
+
+    mov     x8, #SYS_WRITE
+    adr     x0, track_done
+    mov     x1, #(track_done_end - track_done)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #0
+    svc     #0
+    b       .
+
+track_nowin:
+    mov     x8, #SYS_WRITE
+    adr     x0, track_no_window
+    mov     x1, #(track_no_window_end - track_no_window)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #12
+    svc     #0
+    b       .
+
+track_noinput:
+    add     sp, sp, #16
+    mov     x8, #SYS_WRITE
+    adr     x0, track_no_input
+    mov     x1, #(track_no_input_end - track_no_input)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #13
+    svc     #0
+    b       .
+
+track_done:
+    .ascii  "EL0      : СЛЕДОПЫТ: ОТСЛЕДИЛ СОРОК КАСАНИЙ, УХОЖУ\n"
+track_done_end:
+
+track_no_window:
+    .ascii  "EL0      : СЛЕДОПЫТ: ОКНА НЕ ДАЛИ\n"
+track_no_window_end:
+
+track_no_input:
+    .ascii  "EL0      : СЛЕДОПЫТ: ЯДРО НЕ ОТДАЁТ КАСАНИЯ\n"
+track_no_input_end:
+
+.align 4
+.global user_track_end
+user_track_end:

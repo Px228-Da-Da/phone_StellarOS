@@ -161,6 +161,8 @@ static const struct {
     { "двойник",    user_twin_start,  user_twin_end  },
     { "разовая",    user_once_start,  user_once_end  },
     { "запускала",  user_boss_start,  user_boss_end  },
+    { "художник",   user_paint_start, user_paint_end },
+    { "следопыт",   user_track_start, user_track_end },
 };
 
 s64 uspace_spawn_image(u32 index)

@@ -20,6 +20,8 @@
 #include "spinlock.h"
 #include "io.h"
 #include "uspace.h"
+#include "window.h"
+#include "input.h"
 
 /* Общий обработчик прерываний, main.c */
 void irq_handler(void);
@@ -142,6 +144,55 @@ static s64 sys_wait(u64 id)
     return (s64)code;
 }
 
+/*
+ * Может ли программа писать по этому адресу.
+ *
+ * То же, что и проверка на чтение, но команда другая: право писать и
+ * право читать — разные вещи, и страница кода, например, доступна
+ * программе только на чтение. Спрашиваем ровно то, что собираемся
+ * делать.
+ */
+static int user_can_write(u64 va)
+{
+    u64 par;
+    u64 flags = irq_save();
+
+    __asm__ volatile("at s1e0w, %0" :: "r"(va) : "memory");
+    isb();
+    __asm__ volatile("mrs %0, par_el1" : "=r"(par));
+    irq_restore(flags);
+
+    return (par & 1) == 0;
+}
+
+/*
+ * Дождаться касания и отдать его программе.
+ *
+ * Ждём по событию, но со сроком. Условие живёт не в планировщике, а в
+ * очереди событий ввода, и между «очередь пуста» и «уснул» остаётся
+ * промежуток, в который пробуждение можно потерять. Срок превращает
+ * потерю в задержку: событие не пропадёт, просто заберём мы его на
+ * шестьдесят миллисекунд позже. Закрыть промежуток совсем можно было бы,
+ * взяв оба замка сразу, — но это уже порядок взятия двух замков, то есть
+ * разговор о взаимных блокировках ради выигрыша, которого не видно.
+ */
+static s64 sys_input(u64 uva)
+{
+    struct input_event e;
+
+    if (!user_can_write(uva) || !user_can_write(uva + TOUCH_EVENT_BYTES - 1))
+        return -1;
+
+    for (;;) {
+        if (input_pop(&e)) {
+            memcpy((void *)(uintptr_t)uva, &e, TOUCH_EVENT_BYTES);
+            return 1;
+        }
+
+        sched_wait_timeout(INPUT_CHAN, 60);
+    }
+}
+
 static void syscall(struct trapframe *f)
 {
     u64 nr = f->x[8];
@@ -172,6 +223,18 @@ static void syscall(struct trapframe *f)
 
     case SYS_GETPID:
         f->x[0] = task_id();
+        return;
+
+    case SYS_WINDOW:
+        f->x[0] = window_open((u32)f->x[0], (u32)f->x[1]);
+        return;
+
+    case SYS_PRESENT:
+        f->x[0] = (u64)(s64)window_present((u32)f->x[0], (u32)f->x[1]);
+        return;
+
+    case SYS_INPUT:
+        f->x[0] = (u64)sys_input(f->x[0]);
         return;
 
     case SYS_SPAWN:

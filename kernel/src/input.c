@@ -13,6 +13,7 @@
  * придётся только эту задачу.
  */
 #include "input.h"
+#include "sched.h"
 #include "nvt.h"
 #include "sched.h"
 #include "spinlock.h"
@@ -53,6 +54,12 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
     ring[ring_head].y = y;
     ring_head = next;
     spin_unlock_irq(&input_lock, flags);
+
+    /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий
+     * к этому моменту отпущен: будить, держа его, значило бы взять замок
+     * планировщика поверх нашего — а этот порядок в другом месте может
+     * оказаться обратным, и получилась бы взаимная блокировка. */
+    sched_wake(INPUT_CHAN);
 }
 
 int input_pop(struct input_event *e)

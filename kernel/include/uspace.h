@@ -45,5 +45,9 @@ extern const u8 user_once_start[];
 extern const u8 user_once_end[];
 extern const u8 user_boss_start[];
 extern const u8 user_boss_end[];
+extern const u8 user_paint_start[];
+extern const u8 user_paint_end[];
+extern const u8 user_track_start[];
+extern const u8 user_track_end[];
 
 #endif
