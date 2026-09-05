@@ -495,6 +495,10 @@ static void wait_on_locked(u64 chan)
 
     if (c->current && c->current != c->idle) {
         c->current->wait_chan = chan;
+        /* Срок обнуляем обязательно: в этом поле мог остаться давно
+         * прошедший момент от прежнего сна, и пробуждение по времени
+         * сработало бы сразу же — ожидание превратилось бы в опрос. */
+        c->current->wake_ms = 0;
         c->current->state = TASK_WAITING;
     }
 }
