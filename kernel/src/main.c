@@ -1689,6 +1689,9 @@ static void heartbeat_task(void *arg)
         kprintf("         ПРОГРАММ ВЫТЕСНЕНО ПРЯМО В EL0: %lu\n",
                 el0_preempt_count());
 
+        kprintf("         ВВОД: ОПРОСОВ %lu, СБОЕВ %lu, СОБЫТИЙ %lu, ПОТЕРЯНО %u\n",
+                input_scans, input_fails, input_events, input_dropped);
+
         /* Кто-то застрял в запуске программы — скажем, на каком шаге.
          * Печатаем отсюда, а не оттуда: печать по шагам сдвигает
          * тайминг, и зависание перестаёт воспроизводиться. */
