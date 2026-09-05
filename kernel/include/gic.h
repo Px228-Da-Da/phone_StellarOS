@@ -45,4 +45,7 @@ void gic_dispatch(void);
 u64  gic_count(void);
 u64  gic_spurious(void);
 
+/* Состояние контроллера прерываний у текущего ядра — для разбора отказов */
+void gic_debug_dump(void);
+
 #endif

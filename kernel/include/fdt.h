@@ -96,6 +96,13 @@ int fdt_node_prop_u32(u64 dtb_phys, const char *node_name, const char *prop,
                       u32 *out);
 
 /* Запомнить дерево, переданное загрузчиком, чтобы не таскать адрес всюду */
+/*
+ * Список ядер из /cpus: значения reg, то есть идентификаторы для PSCI.
+ * Возвращает, сколько нашлось. Читать их из дерева важнее, чем кажется:
+ * имена узлов и содержимое reg у merlin расходятся.
+ */
+u32 fdt_cpus(u64 dtb_phys, u64 *out, u32 max);
+
 void fdt_set_root(u64 dtb_phys);
 u64  fdt_root(void);
 

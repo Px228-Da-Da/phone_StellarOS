@@ -71,6 +71,8 @@ static u64 gicr_base = GICR_DEFAULT;
 #define ICC_CTLR_EL1        "S3_0_C12_C12_4"
 #define ICC_SRE_EL1         "S3_0_C12_C12_5"    /* System Register Enable */
 #define ICC_IGRPEN1_EL1     "S3_0_C12_C12_7"
+#define ICC_RPR_EL1         "S3_0_C12_C11_3"    /* текущий приоритет      */
+#define ICC_HPPIR1_EL1      "S3_0_C12_C12_2"    /* что ждёт своей очереди */
 
 #define INTID_SPURIOUS      1020        /* ответ GIC: прерываний больше нет */
 #define INTID_MASK          0xFFFFFF
@@ -157,6 +159,65 @@ static int gic_sysreg_supported(void)
  * ядру, редистрибьютор у каждого ядра свой. Настройки CPU0 на разбуженные
  * ядра не распространяются никак, поэтому каждое повторяет это само.
  */
+/*
+ * Состояние контроллера прерываний у текущего ядра.
+ *
+ * Печатается, когда прерывания не пошли. Разбираться в таком отказе по
+ * молчанию невозможно, а эти шесть чисел отвечают почти на всё:
+ *
+ *   RPR   текущий приоритет. Не 0xFF — значит какое-то прерывание
+ *         считается обслуживаемым прямо сейчас, и всё, что не важнее,
+ *         до нас не дойдёт. Так бывает, если загрузчик взял прерывание
+ *         и не отпустил его перед передачей управления.
+ *   HPPIR что ждёт очереди. 1023 — не ждёт ничего.
+ *   PMR   порог: прерывания хуже него не проходят вовсе.
+ *   IGRPEN разрешена ли наша группа.
+ *   ISENABLER какие локальные прерывания включены: таймер — 27-й бит.
+ *   WAKER  проснулся ли редистрибьютор.
+ */
+void gic_debug_dump(void)
+{
+    struct cpu *c = this_cpu();
+    u64 gicr = c ? c->gicr : 0;
+
+    kprintf("GIC      : RPR %02lx HPPIR %lu PMR %02lx GRP1EN %lu SRE %lu\n",
+            SYSREG_READ(ICC_RPR_EL1),
+            SYSREG_READ(ICC_HPPIR1_EL1) & INTID_MASK,
+            SYSREG_READ(ICC_PMR_EL1),
+            SYSREG_READ(ICC_IGRPEN1_EL1) & 1,
+            SYSREG_READ(ICC_SRE_EL1) & 1);
+
+    if (gicr)
+        kprintf("GIC      : GICR %p ВКЛЮЧЕНО %08x ЖДЁТ %08x WAKER %08x\n",
+                (void *)(uintptr_t)gicr,
+                mmio_read32(gicr + GICR_ISENABLER0),
+                mmio_read32(gicr + GICR_ICPENDR0),
+                mmio_read32(gicr + GICR_WAKER));
+}
+
+/*
+ * Отпустить всё, что осталось от загрузчика.
+ *
+ * Прерывание, которое кто-то взял и не отпустил, продолжает считаться
+ * обслуживаемым — и блокирует всё, что не важнее его. Обработчиков у нас
+ * ещё нет, поэтому просто забираем и отпускаем по кругу, пока контроллер
+ * не ответит «больше нечего». Ограничение по числу оборотов обязательно:
+ * если контроллер отвечает не так, как мы думаем, зациклиться здесь
+ * означало бы потерять загрузку целиком.
+ */
+static void gic_drain(void)
+{
+    for (u32 i = 0; i < 64; i++) {
+        u64 iar = SYSREG_READ(ICC_IAR1_EL1);
+        u32 intid = (u32)(iar & INTID_MASK);
+
+        if (intid >= INTID_SPURIOUS)
+            return;
+        SYSREG_WRITE(ICC_EOIR1_EL1, iar);
+        isb();
+    }
+}
+
 int gic_init_cpu(void)
 {
     struct cpu *c = this_cpu();
@@ -204,6 +265,10 @@ int gic_init_cpu(void)
     SYSREG_WRITE(ICC_CTLR_EL1, 0);      /* EOI одним шагом: и приоритет, и деактивация */
     SYSREG_WRITE(ICC_IGRPEN1_EL1, 1);
     isb();
+
+    /* 5. Забираем и отпускаем всё, что осталось незакрытым от загрузчика:
+     *    иначе оно продолжает считаться обслуживаемым и блокирует наши. */
+    gic_drain();
 
     return 0;
 }

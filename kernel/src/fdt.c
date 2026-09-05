@@ -373,6 +373,70 @@ u32 fdt_reserved(u64 dtb_phys, struct fdt_region *out, u32 max)
     return count;
 }
 
+/*
+ * Список ядер из /cpus.
+ *
+ * Возвращает значения reg — те самые, что PSCI ждёт в качестве
+ * идентификатора ядра.
+ *
+ * Почему это важнее, чем кажется. Имена узлов и их содержимое здесь
+ * расходятся: у merlin последнее ядро называется cpu@103, а reg у него
+ * 0x0700. Список, составленный по именам, давал два совпадения из восьми,
+ * и шесть ядер молча не поднимались — прошивка отвечала «нет такого
+ * ядра», а мы считали такой ответ штатным.
+ *
+ * Число ячеек в reg берём из #address-cells самого узла cpus, а не из
+ * корня: у них разные значения, и на merlin это один против двух.
+ */
+u32 fdt_cpus(u64 dtb_phys, u64 *out, u32 max)
+{
+    struct fdt_iter it;
+    struct fdt_event ev;
+    u32 ac = 1;                 /* у /cpus почти всегда одна ячейка */
+    int in_cpus = 0;
+    u32 cpus_depth = 0;
+    int in_cpu_child = 0;
+    u32 n = 0;
+
+    if (!out || !max || fdt_iter_init(dtb_phys, &it) != 0)
+        return 0;
+
+    while (fdt_next(&it, &ev) == 0) {
+        if (!in_cpus) {
+            if (ev.kind == FDT_EV_NODE && node_name_eq(ev.name, "cpus")) {
+                in_cpus = 1;
+                cpus_depth = ev.depth;
+            }
+            continue;
+        }
+
+        if (ev.kind == FDT_EV_END_NODE && ev.depth == cpus_depth)
+            break;                          /* узел cpus кончился */
+
+        if (ev.kind == FDT_EV_PROP && ev.depth == cpus_depth &&
+            str_eq(ev.name, "#address-cells") && ev.len >= 4) {
+            ac = be32p(ev.data);
+            continue;
+        }
+
+        /* Дети узла cpus — не только сами ядра: там же бывают cpu-map и
+         * описания состояний сна. Берём только то, что названо cpu. */
+        if (ev.kind == FDT_EV_NODE && ev.depth == cpus_depth + 1)
+            in_cpu_child = node_name_eq(ev.name, "cpu");
+
+        if (in_cpu_child && ev.kind == FDT_EV_PROP &&
+            ev.depth == cpus_depth + 1 && str_eq(ev.name, "reg") && n < max) {
+            u64 v = 0;
+
+            for (u32 i = 0; i < ac && i * 4 + 4 <= ev.len; i++)
+                v = (v << 32) | be32p(ev.data + i * 4);
+            out[n++] = v;
+        }
+    }
+
+    return n;
+}
+
 int fdt_node_reg(u64 dtb_phys, const char *node_name, u32 index,
                  struct fdt_region *out)
 {
