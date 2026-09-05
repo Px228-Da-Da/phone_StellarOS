@@ -443,55 +443,75 @@ static void touch_power_on_only(void)
 /*
  * Проверка тачскрина: рисуем там, где палец.
  *
- * Опрашиваем контроллер по линии прерывания. Она активна низким уровнем:
- * пока сообщать нечего, микросхема держит её поднятой, и лезть на шину
- * незачем. Так мы и узнаём, что данные готовы, не тратя шину впустую.
+ * Опрашиваем без оглядки на линию прерывания. Она активна низким уровнем
+ * и по-хорошему должна отсекать пустые опросы, но полагаться на неё, пока
+ * не увидели ни одного касания, рано: если она заведена не так, как мы
+ * думаем, мы просто не пойдём на шину и решим, что тачскрин молчит.
+ * Сначала убедимся, что данные идут, и только потом сэкономим на опросе.
  */
 static void touch_demo(u32 seconds)
 {
 #if defined(BOARD_MERLIN)
     struct nvt_touch t[10];
     u64 end = read_cntpct() + read_cntfrq() * seconds;
-    u64 next_report = 0;
-    u32 events = 0;
+    u64 next_report = 0, next_poll = 0;
+    u32 events = 0, polls = 0, irq_low = 0;
 
     fb_clear(COLOR_BLACK);
     kprintf("ТАЧ: КАСАЙСЯ ЭКРАНА %u СЕК\n", seconds);
 
     while (read_cntpct() < end) {
+        u64 now = read_cntpct();
         int n;
 
         usb_poll();
 
-        if (gpio_read(NVT_GPIO_IRQ))    /* линия поднята — сообщать нечего */
+        /* Опрашиваем сто раз в секунду. Без выдержки цикл успевал под
+         * сто тысяч опросов в секунду — столько микросхема не отдаёт, и
+         * между редкими удачными чтениями шла сплошная единица. */
+        if (now < next_poll)
             continue;
+        next_poll = now + read_cntfrq() / 100;
+        polls++;
+        if (!gpio_read(NVT_GPIO_IRQ))
+            irq_low++;
 
         n = nvt_get_touches(t, 10);
-        if (n <= 0)
-            continue;
-        events++;
 
-        for (int i = 0; i < n; i++) {
-            u32 half = 12;
-            u32 x = t[i].x > half ? t[i].x - half : 0;
-            u32 y = t[i].y > half ? t[i].y - half : 0;
-            /* Цвет по номеру пальца: сразу видно, что их различают */
-            static const u32 palette[5] = {
-                0xFF00FF00, 0xFFFF4040, 0xFF4080FF, 0xFFFFFF00, 0xFFFF00FF
-            };
+        if (n > 0) {
+            events++;
+            for (int i = 0; i < n; i++) {
+                u32 half = 12;
+                u32 x = t[i].x > half ? t[i].x - half : 0;
+                u32 y = t[i].y > half ? t[i].y - half : 0;
+                /* Цвет по номеру пальца: сразу видно, что их различают */
+                static const u32 palette[5] = {
+                    0xFF00FF00, 0xFFFF4040, 0xFF4080FF, 0xFFFFFF00, 0xFFFF00FF
+                };
 
-            fb_fill_rect(x, y, half * 2, half * 2, palette[t[i].id % 5]);
+                fb_fill_rect(x, y, half * 2, half * 2, palette[t[i].id % 5]);
+            }
         }
 
-        /* В консоль пишем не чаще пяти раз в секунду: иначе поток
-         * сообщений вытеснит всё остальное из кольца вывода. */
+        /* Раз в секунду отчитываемся, даже если касаний нет: молчание
+         * ничего не говорит, а состояние линии и сырые байты — говорят. */
         if (read_cntpct() >= next_report) {
-            next_report = read_cntpct() + read_cntfrq() / 5;
-            kprintf("ТАЧ: ПАЛЬЦЕВ %d, ПЕРВЫЙ #%u В %u,%u ШИРИНА %u\n",
-                    n, t[0].id, t[0].x, t[0].y, t[0].w);
+            u8 raw[8];
+
+            next_report = read_cntpct() + read_cntfrq();
+            nvt_peek_event(raw, sizeof(raw));
+            kprintf("ТАЧ: ПАЛЬЦЕВ %d, ЛИНИЯ %d, ОПРОСОВ %u НИЗКИХ %u, "
+                    "БАЙТЫ %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    n, gpio_read(NVT_GPIO_IRQ), polls, irq_low,
+                    raw[0], raw[1], raw[2], raw[3],
+                    raw[4], raw[5], raw[6], raw[7]);
+            if (n > 0)
+                kprintf("ТАЧ: ПЕРВЫЙ #%u В %u,%u ШИРИНА %u\n",
+                        t[0].id, t[0].x, t[0].y, t[0].w);
         }
     }
-    kprintf("ТАЧ: СОБЫТИЙ ЗА %u СЕК: %u\n", seconds, events);
+    kprintf("ТАЧ: СОБЫТИЙ ЗА %u СЕК: %u ИЗ %u ОПРОСОВ\n",
+            seconds, events, polls);
 #else
     (void)seconds;
 #endif
@@ -1030,7 +1050,7 @@ void kmain(u64 dtb_phys)
     spi_clk_enable();
     spi_pins_setup();
     nvt_probe();
-    touch_demo(30);
+    touch_demo(45);
 
     if (10 == HALT_AT_OR_ZERO)
         fb_flip_probe();

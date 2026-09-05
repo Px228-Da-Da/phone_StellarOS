@@ -606,8 +606,11 @@ static int nvt_read_points(u8 *out)
         u8 buf[SPI_FIFO_MAX];
         u32 len = NVT_POINT_LEN - done;
 
-        if (len > NVT_CHUNK)
-            len = NVT_CHUNK;
+        /* За полезными байтами на шину уходит ещё два: адрес и холостой.
+         * Их добавляет nvt_read, поэтому просить у неё можно на два
+         * меньше размера очереди, а не на один. */
+        if (len > SPI_FIFO_MAX - 2)
+            len = SPI_FIFO_MAX - 2;
 
         buf[0] = (u8)done;              /* смещение внутри буфера событий */
         if (nvt_read(buf, len + 1))
@@ -617,6 +620,28 @@ static int nvt_read_points(u8 *out)
         done += len;
     }
     return 0;
+}
+
+/* Отдать начало буфера событий как есть.
+ * Когда касаний нет, разобранный ответ пуст и ничего не объясняет,
+ * а сырые байты сразу показывают, идут данные или на шине тишина. */
+void nvt_peek_event(u8 *out, u32 len)
+{
+    u8 buf[SPI_FIFO_MAX];
+
+    if (len > SPI_FIFO_MAX - 2)
+        len = SPI_FIFO_MAX - 2;
+    nvt_set_page(EVENT_BUF_ADDR);
+    for (u32 i = 0; i < sizeof(buf); i++)
+        buf[i] = 0;
+    buf[0] = 0x00;
+    if (nvt_read(buf, len + 1)) {
+        for (u32 i = 0; i < len; i++)
+            out[i] = 0xEE;              /* видно, что чтение не прошло */
+        return;
+    }
+    for (u32 i = 0; i < len; i++)
+        out[i] = buf[1 + i];
 }
 
 /*
@@ -728,5 +753,6 @@ int  nvt_read(u8 *b, u32 n) { (void)b; (void)n; return -1; }
 int  nvt_write(const u8 *b, u32 n) { (void)b; (void)n; return -1; }
 int  nvt_download(void) { return -1; }
 int  nvt_get_touches(struct nvt_touch *t, int m) { (void)t; (void)m; return -1; }
+void nvt_peek_event(u8 *o, u32 n) { (void)o; (void)n; }
 u16  nvt_abs_x_max, nvt_abs_y_max;
 #endif

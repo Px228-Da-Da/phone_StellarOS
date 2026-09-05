@@ -34,6 +34,9 @@ int  nvt_download(void);
 /* Забрать текущие касания. Возвращает сколько их, или -1 при сбое */
 int  nvt_get_touches(struct nvt_touch *t, int max);
 
+/* Сырое начало буфера событий: для отладки, когда касаний не видно */
+void nvt_peek_event(u8 *out, u32 len);
+
 /* Границы поля, как их сообщила поднявшаяся прошивка */
 extern u16 nvt_abs_x_max, nvt_abs_y_max;
 
