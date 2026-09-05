@@ -55,6 +55,10 @@ void ovl_dump(void)
                 i, (src_con & (1U << i)) ? "ВКЛ " : "ВЫКЛ",
                 con, (con & OVL_CON_CFMT_MASK) >> OVL_CON_CFMT_SHIFT,
                 con & OVL_CON_ALPHA_MASK);
+        kprintf("         ОЧЕРЕДЬ %08x ПОРОГИ %08x/%08x\n",
+                mmio_read32(lreg(i, OVL_RDMA0_FIFO)),
+                mmio_read32(lreg(i, OVL_RDMA0_GMC)),
+                mmio_read32(MT_DISP_OVL0_BASE + OVL_RDMA0_GMC_S2 + i * 4));
         kprintf("         РАЗМЕР %08x МЕСТО %08x ШАГ %08x АДРЕС %08x ЧТЕНИЕ %u\n",
                 mmio_read32(lreg(i, OVL_L0_SRC_SIZE)),
                 mmio_read32(lreg(i, OVL_L0_OFFSET)),
@@ -64,19 +68,54 @@ void ovl_dump(void)
     }
 }
 
+/*
+ * Скопировать со слоя 0 настройки доступа к памяти.
+ *
+ * Включить слой и задать ему адрес недостаточно: у каждого слоя есть свои
+ * пороги выборки и свой размер очереди, и загрузчик задаёт их только тем
+ * слоям, которыми пользуется сам. У остальных там нули — очередь нулевого
+ * размера, читать нечем. Слой при этом выглядит полностью настроенным:
+ * адрес на месте, размер верный, чтение разрешено, а на экране ничего.
+ *
+ * Значения не выдумываем, а берём с рабочего слоя 0 — там они заведомо
+ * подходят этой панели и этой полосе пропускания. Тот же приём, что и с
+ * форматом пикселя.
+ */
+static void ovl_copy_fetch_setup(u32 layer)
+{
+    mmio_write32(lreg(layer, OVL_RDMA0_GMC),
+                 mmio_read32(lreg(0, OVL_RDMA0_GMC)));
+    mmio_write32(lreg(layer, OVL_RDMA0_SLOW),
+                 mmio_read32(lreg(0, OVL_RDMA0_SLOW)));
+    mmio_write32(lreg(layer, OVL_RDMA0_FIFO),
+                 mmio_read32(lreg(0, OVL_RDMA0_FIFO)));
+    /* У этого регистра шаг между слоями четыре байта, а не 0x20 */
+    mmio_write32(MT_DISP_OVL0_BASE + OVL_RDMA0_GMC_S2 + layer * 4,
+                 mmio_read32(MT_DISP_OVL0_BASE + OVL_RDMA0_GMC_S2));
+    dsb();
+}
+
 /* Включить или выключить слой в общем регистре.
  * Читаем-меняем-пишем только свой бит: соседние слои трогать нельзя. */
 static void ovl_enable(u32 layer, int on)
 {
     u32 v = mmio_read32(MT_DISP_OVL0_BASE + OVL_SRC_CON);
 
-    if (on)
+    if (on) {
         v |= (1U << layer);
+        ovl_copy_fetch_setup(layer);
+    }
     else
         v &= ~(1U << layer);
     mmio_write32(MT_DISP_OVL0_BASE + OVL_SRC_CON, v);
     mmio_write32(lreg(layer, OVL_RDMA0_CTRL), on ? 1 : 0);
     dsb();
+}
+
+void ovl_base_layer(int on)
+{
+    fb_wait_frame_gap();
+    ovl_enable(0, on);
 }
 
 int ovl_layer_set(u32 layer, const volatile void *buf,
@@ -191,5 +230,6 @@ int  ovl_layer_color(u32 l, u32 c, u32 x, u32 y, u32 w, u32 h)
 void ovl_layer_move(u32 l, u32 x, u32 y) { (void)l; (void)x; (void)y; }
 void ovl_layer_alpha(u32 l, u32 a) { (void)l; (void)a; }
 void ovl_layer_off(u32 l) { (void)l; }
+void ovl_base_layer(int on) { (void)on; }
 
 #endif

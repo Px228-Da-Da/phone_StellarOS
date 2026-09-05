@@ -379,6 +379,21 @@ static u8  ep0_addr_pending;
 static u64 ep0_addr_deadline;       /* когда можно применить адрес */
 static int usb_configured;
 
+/*
+ * Открыт ли порт на той стороне.
+ *
+ * Хост сообщает об этом отдельным запросом класса: SET_CONTROL_LINE_STATE
+ * с поднятым битом DTR приходит ровно в момент открытия порта терминалом
+ * и снимается при закрытии. До этого момента всё, что мы отправим,
+ * драйвер на компьютере просто выбрасывает — порт ещё никем не читается.
+ *
+ * Пока сигнала нет, копим в кольце и молчим. Именно из-за отсутствия
+ * этой проверки начало загрузочного отчёта пропадало каждый раз: ядро
+ * добросовестно отдавало его в пустоту, а терминал подключался секундой
+ * позже и заставал уже середину.
+ */
+static int usb_host_open;
+
 u32 usb_setup_count;
 
 static void fifo_write(u32 ep, const u8 *d, u32 n)
@@ -522,6 +537,10 @@ static void ep0_setup(const u8 *p)
             mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY);
             return;
         } else {
+            /* SET_CONTROL_LINE_STATE: младший бит — DTR, «порт открыт».
+             * Единственный класс-запрос, который нам не безразличен. */
+            if (req == 0x22)
+                usb_host_open = (val & 1) != 0;
             /* Данных нет — завершаем сразу */
             mmio_write16(USB_BASE + MUSB_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
             return;
@@ -661,7 +680,7 @@ void usb_send(const u8 *data, u32 len)
     /* Печатать могут все ядра, но в контроллер лезет только загрузочное.
      * Остальным строка просто не достаётся — на экране и в UART она
      * всё равно останется. */
-    if (!usb_configured || cpu_id() != 0)
+    if (!usb_configured || !usb_host_open || cpu_id() != 0)
         return;
     flags = spin_lock_irq(&usb_lock);
     usb_send_locked(data, len);
@@ -737,7 +756,7 @@ void usb_flush(void)
 {
     u64 flags;
 
-    if (!usb_configured || cpu_id() != 0)
+    if (!usb_configured || !usb_host_open || cpu_id() != 0)
         return;
     flags = spin_lock_irq(&usb_lock);
     ring_drain_locked();
