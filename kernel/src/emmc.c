@@ -285,6 +285,104 @@ int emmc_read_block(u64 lba, void *dst)
  */
 static u8 sector[512] __attribute__((aligned(8)));
 
+/*
+ * Таблица разделов.
+ *
+ * GPT устроена просто: во втором секторе заголовок с сигнатурой
+ * EFI PART, а в нём сказано, с какого сектора начинается список записей,
+ * сколько их и какого размера каждая. Запись — это два идентификатора,
+ * первый и последний сектор раздела и имя в UTF-16.
+ *
+ * Имена нам и нужны: раздел boot, из которого нас загрузили, на этом
+ * телефоне тридцать четвёртый по счёту, и знать это наизусть неоткуда —
+ * узнаём из таблицы. Проверить себя есть чем: список разделов уже снят
+ * с живого устройства в device-info/partitions.txt.
+ *
+ * Имя переводим грубо: берём каждый второй байт. Для UTF-16 это верно
+ * ровно для латиницы и цифр, а имена разделов другими и не бывают.
+ */
+#define GPT_ENTRIES_LBA     72      /* смещение в заголовке */
+#define GPT_ENTRY_COUNT     80
+#define GPT_ENTRY_SIZE      84
+
+static u32 le32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static u64 le64(const u8 *p)
+{
+    return (u64)le32(p) | ((u64)le32(p + 4) << 32);
+}
+
+static u8 entries[512] __attribute__((aligned(8)));
+
+void emmc_gpt_dump(void)
+{
+    u64 first_lba;
+    u32 count, size, shown = 0;
+
+    if (emmc_read_block(1, sector) != 0)
+        return;
+
+    first_lba = le64(sector + GPT_ENTRIES_LBA);
+    count     = le32(sector + GPT_ENTRY_COUNT);
+    size      = le32(sector + GPT_ENTRY_SIZE);
+
+    kprintf("GPT      : ЗАПИСЕЙ %u ПО %u БАЙТ, С СЕКТОРА %lu\n",
+            count, size, first_lba);
+
+    if (!size || size > 512 || 512 % size) {
+        kprintf("GPT      : СТРАННЫЙ РАЗМЕР ЗАПИСИ, РАЗБИРАТЬ НЕ БУДУ\n");
+        return;
+    }
+
+    for (u32 i = 0; i < count && shown < 64; i++) {
+        u32 per_block = 512 / size;
+        u32 off = (i % per_block) * size;
+        const u8 *e;
+        char name[40];
+        u32 n = 0;
+        u64 lba_a, lba_b;
+
+        if (i % per_block == 0 &&
+            emmc_read_block(first_lba + i / per_block, entries) != 0)
+            return;
+
+        e = entries + off;
+
+        /* Пустая запись: тип раздела — все нули */
+        {
+            int empty = 1;
+
+            for (u32 k = 0; k < 16; k++)
+                if (e[k]) {
+                    empty = 0;
+                    break;
+                }
+            if (empty)
+                continue;
+        }
+
+        lba_a = le64(e + 32);
+        lba_b = le64(e + 40);
+
+        for (u32 k = 0; k < 36 && n < sizeof(name) - 1; k++) {
+            u8 c = e[56 + k * 2];
+
+            if (!c)
+                break;
+            name[n++] = (char)c;
+        }
+        name[n] = 0;
+
+        kprintf("GPT %2u   : %s — СЕКТОРА %lu..%lu, %lu МБ\n",
+                i + 1, name, lba_a, lba_b,
+                (lba_b - lba_a + 1) / 2048);
+        shown++;
+    }
+}
+
 void emmc_read_probe(void)
 {
     static const char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
@@ -312,6 +410,7 @@ void emmc_read_probe(void)
     }
 
     kprintf("EMMC     : СЕКТОР 1 — EFI PART. ЧТЕНИЕ РАБОТАЕТ.\n");
+    emmc_gpt_dump();
 }
 
 void emmc_probe(void)
@@ -343,5 +442,7 @@ int emmc_read_block(u64 lba, void *dst)
     (void)lba; (void)dst;
     return -1;
 }
+
+void emmc_gpt_dump(void) { }
 
 #endif
