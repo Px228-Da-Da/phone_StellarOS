@@ -20,6 +20,7 @@
 #include "timer.h"
 #include "mmu.h"
 #include "window.h"
+#include "input.h"
 #include "print.h"
 #include "io.h"
 
@@ -662,6 +663,7 @@ static void reap_one(struct task *t)
      * а разборщик вернул бы его аллокатору как обычную страницу
      * программы. */
     window_task_gone(t->id, t->ttbr0);
+    input_unsubscribe(t->id);
 
     if (t->ttbr0)
         mmu_free_user_space(t->ttbr0);

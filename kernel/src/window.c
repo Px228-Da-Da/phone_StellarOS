@@ -45,6 +45,7 @@ struct window {
     u32  x, y;
     int  on_layer;          /* показано слоем оверлея, а не копией  */
     int  told_copy;         /* уже сказали, что идём копией         */
+    u32  moves;             /* сколько раз переезжало по экрану     */
 };
 
 static struct spinlock win_lock = SPINLOCK_INIT("window");
@@ -136,6 +137,7 @@ u64 window_open(u32 w, u32 h)
     win->y = 0;
     win->on_layer = 0;
     win->told_copy = 0;
+    win->moves = 0;
 
     /*
      * Отображаем буфер программе некэшируемым — тем же, чем он помечен у
@@ -162,13 +164,70 @@ u64 window_open(u32 w, u32 h)
  * есть. Увиденный раз в жизни шов лучше, чем программа, которая перестала
  * отвечать, — то же решение и по той же причине, что в оболочке.
  */
+/*
+ * Кому достанется слой.
+ *
+ * Слой один, а окон несколько, и раздавать его по очереди прихода — не
+ * то же самое, что раздавать по надобности. Неподвижному окну слой не
+ * нужен: оно рисуется раз и остаётся на месте, копия в кадр обходится
+ * ему в одну отрисовку. А окно, которое ездит за пальцем, копией
+ * оставляет за собой след из своих прежних положений — там кадр никто
+ * не восстанавливает.
+ *
+ * Поэтому правило простое: движущееся забирает слой у неподвижного.
+ * Обратно — нет: иначе два подвижных окна отбирали бы слой друг у друга
+ * на каждом кадре.
+ */
+static struct window *layer_holder(void)
+{
+    for (u32 i = 0; i < WINDOW_MAX; i++)
+        if (windows[i].owner && windows[i].owner == layer_owner)
+            return &windows[i];
+
+    return NULL;
+}
+
+static int may_take_layer(struct window *win)
+{
+    struct window *held;
+
+    if (!layer_owner || layer_owner == win->owner)
+        return 1;
+
+    held = layer_holder();
+    if (!held || held->moves || !win->moves)
+        return 0;               /* держит подвижное или мы сами стоим */
+
+    return 1;
+}
+
+/*
+ * Записываем владельца ТОЛЬКО после удачной настройки слоя.
+ *
+ * Иначе владельцем становится тот, у кого ничего не получилось: там, где
+ * слоёв нет вовсе, первое же окно объявляло бы слой занятым, а
+ * остальные получали бы отказ и жалобу в лог на пустом месте.
+ */
+static void claim_layer(struct window *win)
+{
+    struct window *held = layer_holder();
+
+    if (held && held != win) {
+        held->on_layer = 0;     /* прежний владелец уходит на копию */
+        held->told_copy = 0;
+    }
+
+    layer_owner = win->owner;
+}
+
 static int show_by_layer(struct window *win, u32 x, u32 y)
 {
-    int first = !win->on_layer;
+    int first;
 
-    if (layer_owner && layer_owner != win->owner)
-        return -1;              /* слой занят соседом, пойдём копией */
-    layer_owner = win->owner;
+    if (!may_take_layer(win))
+        return -1;              /* слой у того, кому он нужнее */
+
+    first = !win->on_layer;
 
     for (int attempt = 0; attempt < 3; attempt++) {
         u64 flags;
@@ -187,6 +246,7 @@ static int show_by_layer(struct window *win, u32 x, u32 y)
                 return -1;
             }
             win->on_layer = 1;
+            claim_layer(win);
         } else {
             ovl_layer_move(WINDOW_LAYER, x, y);
         }
@@ -200,6 +260,7 @@ static int show_by_layer(struct window *win, u32 x, u32 y)
                           win->w, win->h, win->w * 4, 255) != 0)
             return -1;
         win->on_layer = 1;
+        claim_layer(win);
     } else {
         ovl_layer_move(WINDOW_LAYER, x, y);
     }
@@ -253,13 +314,20 @@ int window_present(u32 x, u32 y)
     if (!win || !win->buf)
         return -1;
 
+    if (win->x != x || win->y != y)
+        win->moves++;
+
     rc = show_by_layer(win, x, y);
     if (rc != 0) {
         /* Сказать один раз: слой один на всех, и кто именно его занял —
          * это то, чего иначе не видно ни в логе, ни на экране. */
         if (!win->told_copy) {
-            kprintf("ОКНО     : %s ПОКАЗЫВАЕТСЯ КОПИЕЙ В КАДР, СЛОЙ ЗАНЯТ\n",
-                    task_name());
+            /* Причины две, и они разные: слой может быть занят соседом,
+             * а может не существовать вовсе — как в эмуляторе. Путать
+             * их в отчёте значит искать потом несуществующего соседа. */
+            kprintf("ОКНО     : %s ПОКАЗЫВАЕТСЯ КОПИЕЙ В КАДР (%s)\n",
+                    task_name(),
+                    layer_owner ? "СЛОЙ ЗАНЯТ" : "СЛОЁВ НЕТ");
             win->told_copy = 1;
         }
         rc = show_by_copy(win, x, y);

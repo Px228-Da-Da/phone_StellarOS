@@ -185,7 +185,7 @@ static s64 sys_input(u64 uva)
         return -1;
 
     for (;;) {
-        if (input_pop(&e)) {
+        if (input_pop_task(task_id(), &e)) {
             memcpy((void *)(uintptr_t)uva, &e, TOUCH_EVENT_BYTES);
             return 1;
         }

@@ -30,6 +30,82 @@ static u32 ring_head, ring_tail;
 
 u32 input_dropped;
 
+/*
+ * Очереди программ.
+ *
+ * Маленькие: касание — событие быстрое, и программа, которая не
+ * забирает его сотню штук подряд, всё равно уже безнадёжно отстала.
+ * Переполнение теряет новое событие, как и в общей очереди.
+ */
+#define SUB_MAX     4
+#define SUB_RING    16
+
+static struct {
+    u64 owner;                          /* 0 — слот свободен */
+    u32 head, tail;
+    struct input_event ring[SUB_RING];
+} subs[SUB_MAX];
+
+/* Разложить событие по очередям программ. Под общим замком ввода. */
+static void subs_push_locked(const struct input_event *e)
+{
+    for (u32 i = 0; i < SUB_MAX; i++) {
+        u32 next;
+
+        if (!subs[i].owner)
+            continue;
+        next = (subs[i].head + 1) & (SUB_RING - 1);
+        if (next == subs[i].tail) {
+            input_dropped++;
+            continue;
+        }
+        subs[i].ring[subs[i].head] = *e;
+        subs[i].head = next;
+    }
+}
+
+int input_pop_task(u64 task, struct input_event *e)
+{
+    u64 flags = spin_lock_irq(&input_lock);
+    int got = 0;
+
+    for (u32 i = 0; i < SUB_MAX; i++) {
+        if (subs[i].owner != task)
+            continue;
+        if (subs[i].tail != subs[i].head) {
+            *e = subs[i].ring[subs[i].tail];
+            subs[i].tail = (subs[i].tail + 1) & (SUB_RING - 1);
+            got = 1;
+        }
+        spin_unlock_irq(&input_lock, flags);
+        return got;
+    }
+
+    /* Первое обращение: заводим очередь и уходим ни с чем — то, что
+     * случилось до подписки, было без нас. */
+    for (u32 i = 0; i < SUB_MAX; i++) {
+        if (subs[i].owner)
+            continue;
+        subs[i].owner = task;
+        subs[i].head = subs[i].tail = 0;
+        break;
+    }
+
+    spin_unlock_irq(&input_lock, flags);
+    return 0;
+}
+
+void input_unsubscribe(u64 task)
+{
+    u64 flags = spin_lock_irq(&input_lock);
+
+    for (u32 i = 0; i < SUB_MAX; i++)
+        if (subs[i].owner == task)
+            subs[i].owner = 0;
+
+    spin_unlock_irq(&input_lock, flags);
+}
+
 static void event_push(u8 id, u8 action, u16 x, u16 y)
 {
     u32 next = (ring_head + 1) & (EVENT_RING - 1);
@@ -48,11 +124,19 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
         return;
     }
 
-    ring[ring_head].id = id;
-    ring[ring_head].action = action;
-    ring[ring_head].x = x;
-    ring[ring_head].y = y;
+    struct input_event ev;
+
+    ev.id = id;
+    ev.action = action;
+    ev.x = x;
+    ev.y = y;
+
+    ring[ring_head] = ev;
     ring_head = next;
+
+    /* И каждому подписчику свою копию: они забирают из своих очередей,
+     * а не наперегонки из этой. */
+    subs_push_locked(&ev);
     spin_unlock_irq(&input_lock, flags);
 
     /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий
