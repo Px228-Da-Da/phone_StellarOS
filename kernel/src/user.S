@@ -563,12 +563,63 @@ paint_show:
     subs    x21, x21, #1
     b.ne    paint_show
 
+    /*
+     * Окно больше не нужно — закрываем его, не завершаясь, и тут же
+     * просим другое. Так проверяется, что слот и слой действительно
+     * вернулись: раньше отдать их можно было только вместе с самой
+     * программой.
+     */
+    mov     x8, #SYS_CLOSE
+    svc     #0
+    tbnz    x0, #63, paint_noclose
+
+    mov     x8, #SYS_SLEEP_MS
+    mov     x0, #400
+    svc     #0
+
+    mov     x8, #SYS_WINDOW
+    mov     x0, #160
+    mov     x1, #160
+    svc     #0
+    cbz     x0, paint_nowin
+    mov     x19, x0
+
+    /* Второе окно — сплошной заливкой, чтобы его нельзя было спутать
+     * с первым. */
+    movz    w25, #0x40A0
+    movk    w25, #0xFF20, lsl #16
+    mov     x20, #(160 * 160)
+    mov     x21, x19
+paint_fill2:
+    str     w25, [x21], #4
+    subs    x20, x20, #1
+    b.ne    paint_fill2
+
+    mov     x8, #SYS_PRESENT
+    mov     x0, #400
+    mov     x1, #300
+    svc     #0
+
+    mov     x8, #SYS_SLEEP_MS
+    mov     x0, #1200
+    svc     #0
+
     mov     x8, #SYS_WRITE
     adr     x0, paint_done
     mov     x1, #(paint_done_end - paint_done)
     svc     #0
     mov     x8, #SYS_EXIT
     mov     x0, #0
+    svc     #0
+    b       .
+
+paint_noclose:
+    mov     x8, #SYS_WRITE
+    adr     x0, paint_no_close
+    mov     x1, #(paint_no_close_end - paint_no_close)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #16
     svc     #0
     b       .
 
@@ -593,7 +644,7 @@ paint_noshow:
     b       .
 
 paint_done:
-    .ascii  "EL0      : ХУДОЖНИК: НАРИСОВАЛ И ПОКАЗАЛ ПЯТЬ РАЗ\n"
+    .ascii  "EL0      : ХУДОЖНИК: ПОКАЗАЛ, ЗАКРЫЛ ОКНО И ОТКРЫЛ ДРУГОЕ\n"
 paint_done_end:
 
 paint_no_window:
@@ -603,6 +654,10 @@ paint_no_window_end:
 paint_no_show:
     .ascii  "EL0      : ХУДОЖНИК: ПОКАЗАТЬ ОКНО НЕ ВЫШЛО\n"
 paint_no_show_end:
+
+paint_no_close:
+    .ascii  "EL0      : ХУДОЖНИК: ОКНО НЕ ЗАКРЫЛОСЬ\n"
+paint_no_close_end:
 
 .align 4
 .global user_paint_end

@@ -355,6 +355,52 @@ int window_text(u32 x, u32 y, u32 scale, u32 fg, const char *s)
     return 0;
 }
 
+/*
+ * Общая часть закрытия: снять со слоя и освободить слот.
+ *
+ * Отдельной функцией, потому что закрывают окно двое — сама программа и
+ * сборщик за завершившейся, — и делать это они обязаны одинаково.
+ * Отображение снимает вызывающий: у программы оно своё и текущее, а у
+ * сборщика — чужое, взятое из задачи.
+ */
+static void window_release(struct window *win, u64 task)
+{
+    if (win->on_layer)
+        ovl_layer_off(WINDOW_LAYER);
+    if (layer_owner == task)
+        layer_owner = 0;        /* слой освободился для соседей */
+
+    win->on_layer = 0;
+    win->told_copy = 0;
+    win->moves = 0;
+    win->owner = 0;
+}
+
+int window_close(void)
+{
+    u64 task = task_id();
+    u64 space = task_space();
+    struct window *win;
+    u64 flags = spin_lock_irq(&win_lock);
+
+    win = window_of(task);
+    if (!win) {
+        spin_unlock_irq(&win_lock, flags);
+        return -1;
+    }
+
+    window_release(win, task);
+    spin_unlock_irq(&win_lock, flags);
+
+    /* Отображение снимаем последним: пока оно есть, программа ещё может
+     * писать в буфер, который уже никому не показывается, — это лучше,
+     * чем наоборот. */
+    if (space)
+        mmu_unmap_user(space, WINDOW_UVA, WINDOW_BYTES);
+
+    return 0;
+}
+
 void window_task_gone(u64 task, u64 ttbr0)
 {
     struct window *win;
@@ -366,12 +412,7 @@ void window_task_gone(u64 task, u64 ttbr0)
         return;
     }
 
-    if (win->on_layer)
-        ovl_layer_off(WINDOW_LAYER);
-    if (layer_owner == task)
-        layer_owner = 0;        /* слой освободился для соседей */
-    win->on_layer = 0;
-    win->owner = 0;
+    window_release(win, task);
     spin_unlock_irq(&win_lock, flags);
 
     /*

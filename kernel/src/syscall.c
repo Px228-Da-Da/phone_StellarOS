@@ -267,6 +267,10 @@ static void syscall(struct trapframe *f)
                                      f->x[4], f->x[5]);
         return;
 
+    case SYS_CLOSE:
+        f->x[0] = (u64)(s64)window_close();
+        return;
+
     case SYS_SCREEN: {
         u64 base;
         u32 w, h, stride;
