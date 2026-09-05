@@ -18,6 +18,7 @@
 #include "kmalloc.h"
 #include "pmm.h"
 #include "timer.h"
+#include "mmu.h"
 #include "print.h"
 #include "io.h"
 
@@ -33,6 +34,7 @@ struct task {
     u32 slice_used;             /* сколько тиков задача уже отработала   */
     u64 slices;                 /* сколько раз получала процессор        */
     u64 last_cpu;
+    u64 ttbr0;                  /* своё адресное пространство; 0 — ядра  */
     void *stack;
     struct task *next;          /* следующая в очереди готовых           */
     struct task *all_next;      /* список всех задач, для диагностики    */
@@ -171,6 +173,12 @@ struct task *task_create(const char *name, task_fn fn, void *arg)
 struct task *task_create_prio(const char *name, task_fn fn, void *arg,
                               u32 prio)
 {
+    return task_create_space(name, fn, arg, prio, 0);
+}
+
+struct task *task_create_space(const char *name, task_fn fn, void *arg,
+                               u32 prio, u64 ttbr0)
+{
     struct task *t = kzalloc(sizeof(*t));
     u8 *stack;
     u64 *frame;
@@ -188,6 +196,7 @@ struct task *task_create_prio(const char *name, task_fn fn, void *arg,
     t->prio  = prio;
     t->stack = stack;
     t->state = TASK_READY;
+    t->ttbr0 = ttbr0;
 
     /*
      * Собираем кадр так, будто задача уже когда-то вызывала ctx_switch:
@@ -270,6 +279,26 @@ void schedule(void)
 
     next->slices++;
     c->current = next;
+
+    /*
+     * Смена адресного пространства.
+     *
+     * Делается ДО переключения контекста и только при разнице: у задач
+     * ядра пространство одно на всех, и переписывать TTBR0 на каждом
+     * переключении означало бы платить за то, чего не происходит.
+     *
+     * Сброса TLB здесь нет: пользовательские записи помечены номером
+     * своего пространства (ASID), ядерные глобальны, и процессор сам
+     * не возьмёт чужую.
+     *
+     * Порядок «сначала таблицы, потом стек» важен: после ctx_switch мы
+     * уже исполняемся на стеке новой задачи, а он обязан быть отображён
+     * в том пространстве, которое сейчас включено. Обязан он и в старом —
+     * стеки задач ядерные, а ядерные отображения есть в каждом
+     * пространстве, поэтому переход безопасен в любую сторону.
+     */
+    if (next->ttbr0 != prev->ttbr0)
+        mmu_switch(next->ttbr0 ? next->ttbr0 : mmu_kernel_space());
 
     ctx_switch(&prev->sp, next->sp);
 

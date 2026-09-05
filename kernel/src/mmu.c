@@ -19,6 +19,7 @@
 #include "io.h"
 #include "print.h"
 #include "pmm.h"
+#include "spinlock.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -234,6 +235,7 @@ void mmu_set_range_nc(u64 pa, u64 size)
 #define D_PAGE      (3UL << 0)      /* валидная запись третьего уровня */
 #define D_AP_USER   (1UL << 6)      /* AP[1]: доступ есть и у EL0      */
 #define D_AP_RO     (2UL << 6)      /* AP[2]: только чтение            */
+#define D_NG        (1UL << 11)     /* запись принадлежит одному ASID  */
 
 /*
  * Спуститься на уровень ниже, создав таблицу, если её ещё нет.
@@ -266,11 +268,22 @@ static u64 *next_level(u64 *table, u64 index)
     return (u64 *)page;
 }
 
-int mmu_map_user(u64 va, u64 pa, u64 size, u32 kind)
+int mmu_map_user(u64 root, u64 va, u64 pa, u64 size, u32 kind)
 {
+    /*
+     * nG обязателен. Без него запись считается глобальной, то есть
+     * годной для любого адресного пространства, и процессор вправе
+     * ответить соседней программе по её собственному адресу страницей
+     * этой. Именно эта мелочь превращает раздельные пространства
+     * обратно в общее — молча и не сразу.
+     */
     u64 attr = D_PAGE | D_ATTRIDX(ATTR_NORMAL) | D_AF | D_SH_INNER |
-               D_AP_USER | D_PXN;
+               D_AP_USER | D_PXN | D_NG;
+    u64 *l1 = (u64 *)(uintptr_t)(root & 0x0000FFFFFFFFF000UL);
     u64 end;
+
+    if (!l1)
+        return -1;
 
     if (kind != MMU_USER_RX)
         attr |= D_UXN;              /* исполнять можно только код     */
@@ -285,7 +298,7 @@ int mmu_map_user(u64 va, u64 pa, u64 size, u32 kind)
     pa &= ~(PAGE_SIZE - 1);
 
     for (; va < end; va += PAGE_SIZE, pa += PAGE_SIZE) {
-        u64 *l2 = next_level(l1_table, (va >> 30) & (ENTRIES - 1));
+        u64 *l2 = next_level(l1, (va >> 30) & (ENTRIES - 1));
         u64 *l3;
 
         if (!l2)
@@ -330,5 +343,59 @@ void mmu_sync_icache(u64 va, u64 size)
     for (u64 a = va & ~(iline - 1); a < end; a += iline)
         __asm__ volatile("ic ivau, %0" :: "r"(a) : "memory");
     __asm__ volatile("dsb ish" ::: "memory");
+    isb();
+}
+
+/*
+ * Новое адресное пространство.
+ *
+ * Корень — одна страница на 512 записей верхнего уровня. Ядерные записи
+ * копируем из исходной таблицы: это указатели на общие таблицы второго
+ * уровня, поэтому копия не удваивает память и не расходится с оригиналом
+ * при правках вроде перекраски фреймбуфера в некэшируемый.
+ *
+ * Номера пространств раздаём подряд. Их 255, и когда они кончатся, надо
+ * будет освобождать номера завершившихся программ и вычищать за ними
+ * TLB. Пока программ единицы, честнее отказать, чем выдать номер,
+ * который уже кем-то занят: одинаковый ASID у двух разных таблиц — это
+ * ровно та ошибка, ради предотвращения которой номера и заведены.
+ */
+static volatile u64 next_asid;      /* atomic_inc вернёт уже увеличенное */
+
+u64 mmu_kernel_space(void)
+{
+    return (u64)(uintptr_t)l1_table;    /* ASID 0 */
+}
+
+u64 mmu_new_user_space(void)
+{
+    u64 *root = pmm_alloc();
+    u64 asid;
+
+    if (!root)
+        return 0;
+
+    asid = atomic_inc(&next_asid);      /* первый номер — 1, нулевой у ядра */
+    if (asid > 255) {
+        kprintf("MMU      : НОМЕРА АДРЕСНЫХ ПРОСТРАНСТВ КОНЧИЛИСЬ\n");
+        pmm_free(root);
+        return 0;
+    }
+
+    for (u32 i = 0; i < ENTRIES; i++)
+        root[i] = l1_table[i];
+
+    dsb();
+    return ((u64)(uintptr_t)root) | (asid << 48);
+}
+
+void mmu_switch(u64 ttbr0)
+{
+    /*
+     * Сброса TLB здесь нет и не должно быть: пользовательские записи
+     * помечены своим ASID, ядерные глобальны. Сброс на каждом
+     * переключении задач стоил бы дороже самого переключения.
+     */
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"(ttbr0) : "memory");
     isb();
 }

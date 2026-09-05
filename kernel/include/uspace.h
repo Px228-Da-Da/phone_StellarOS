@@ -28,5 +28,7 @@ extern const u8 user_rogue_start[];
 extern const u8 user_rogue_end[];
 extern const u8 user_spin_start[];
 extern const u8 user_spin_end[];
+extern const u8 user_twin_start[];
+extern const u8 user_twin_end[];
 
 #endif
