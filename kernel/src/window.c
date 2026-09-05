@@ -253,8 +253,18 @@ static int pick_layer(struct window *win)
  * слоёв нет вовсе, первое же окно объявляло бы слой занятым, а
  * остальные получали бы отказ и жалобу в лог на пустом месте.
  */
+static int dumped_layer;
+
 static void claim_layer(struct window *win, int layer)
 {
+    /* Один раз показываем, с чем именно настроен слой: формат пикселя,
+     * прозрачность, шаг строки. Разбирать цвета на экране без этих
+     * чисел — гадание. */
+    if (!dumped_layer) {
+        dumped_layer = 1;
+        ovl_dump();
+    }
+
     struct window *held = holder_of(layer);
 
     if (held && held != win)
