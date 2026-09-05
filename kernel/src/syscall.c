@@ -19,6 +19,7 @@
 #include "string.h"
 #include "spinlock.h"
 #include "io.h"
+#include "uspace.h"
 
 /* Общий обработчик прерываний, main.c */
 void irq_handler(void);
@@ -110,6 +111,34 @@ static s64 sys_write(u64 uva, u64 len)
     return (s64)len;
 }
 
+/*
+ * Дождаться, пока задача кончится, и узнать чем.
+ *
+ * Ожидание сделано сном с переспросом, а не очередью ждущих. Очередь
+ * правильнее — она будит ровно того, кого надо, и ровно тогда, когда
+ * надо, — но ей нужен механизм пробуждения по событию, которого у
+ * планировщика пока нет. Сон по десять миллисекунд стоит одного
+ * переключения задач в эти же десять миллисекунд и на общей картине не
+ * виден; когда появится ожидание по событию, замена будет ровно здесь.
+ *
+ * Ждать чужую задачу, а не только свою, никто не мешает: родство
+ * задач ядро пока не отслеживает. Наружу это отдаёт только код
+ * завершения — не тайну, но так и запишем, чтобы потом не выглядело
+ * замыслом.
+ */
+static s64 sys_wait(u64 id)
+{
+    for (;;) {
+        u64 code;
+
+        if (sched_exit_code(id, &code))
+            return (s64)code;
+        if (!sched_task_alive(id))
+            return -1;          /* такой задачи нет и не было */
+        task_sleep_ms(10);
+    }
+}
+
 static void syscall(struct trapframe *f)
 {
     u64 nr = f->x[8];
@@ -117,7 +146,7 @@ static void syscall(struct trapframe *f)
     switch (nr) {
     case SYS_EXIT:
         kprintf("EL0      : %s ЗАВЕРШИЛАСЬ, КОД %lu\n", task_name(), f->x[0]);
-        task_exit();
+        task_exit_code(f->x[0]);
         return;                 /* сюда управление уже не возвращается */
 
     case SYS_WRITE:
@@ -140,6 +169,14 @@ static void syscall(struct trapframe *f)
 
     case SYS_GETPID:
         f->x[0] = task_id();
+        return;
+
+    case SYS_SPAWN:
+        f->x[0] = (u64)uspace_spawn_image((u32)f->x[0]);
+        return;
+
+    case SYS_WAIT:
+        f->x[0] = (u64)sys_wait(f->x[0]);
         return;
 
     default:
@@ -174,7 +211,7 @@ static void kill_task(struct trapframe *f, u64 esr)
             (void *)(uintptr_t)read_far(), (void *)(uintptr_t)f->elr,
             esr, ec);
 
-    task_exit();
+    task_exit_code(EXIT_KILLED);
 }
 
 /*

@@ -30,6 +30,7 @@
 #include "kmalloc.h"
 #include "string.h"
 #include "print.h"
+#include "io.h"
 
 /* Спуск в EL0, switch.S */
 extern void enter_el0(u64 pc, u64 sp);
@@ -76,9 +77,10 @@ static void user_trampoline(void *arg)
     enter_el0(entry, sp);
 }
 
-int uspace_spawn(const char *name, const void *image, u64 size)
+s64 uspace_spawn(const char *name, const void *image, u64 size)
 {
     struct uproc *p;
+    struct task *t;
     void *code, *stack;
     u64 root, code_bytes;
     u32 code_pages;
@@ -128,12 +130,44 @@ int uspace_spawn(const char *name, const void *image, u64 size)
     /* Стек растёт вниз, поэтому начинаем с верхней границы его страниц */
     p->sp = USER_BASE + USER_STACK_OFF + USER_STACK_PAGES * PAGE_SIZE;
 
-    if (!task_create_space(name, user_trampoline, p, TASK_PRIO_NORMAL, root)) {
+    t = task_create_space(name, user_trampoline, p, TASK_PRIO_NORMAL, root);
+    if (!t) {
         kprintf("EL0      : %s НЕ ЗАПУЩЕНА — НЕТ МЕСТА ПОД ЗАДАЧУ\n", name);
         return -1;
     }
 
-    kprintf("EL0      : %s СОЗДАНА, ПРОСТРАНСТВО %lu, КОД %p\n",
-            name, root >> 48, code);
-    return 0;
+    kprintf("EL0      : %s СОЗДАНА, ЗАДАЧА %lu, ПРОСТРАНСТВО %lu\n",
+            name, task_id_of(t), root >> 48);
+    return (s64)task_id_of(t);
+}
+
+/*
+ * Список программ, вшитых в образ.
+ *
+ * Это временная замена файловой системе, и она честно на неё не похожа:
+ * список неизменный, номера в нём — часть договора с EL0 (IMG_* в
+ * syscall.h). Когда появится чтение разделов, отсюда уедет только
+ * источник байтов; всё остальное — отображение, пространство, задача —
+ * останется как есть.
+ */
+static const struct {
+    const char *name;
+    const u8 *start;
+    const u8 *end;
+} images[] = {
+    { "привет",     user_hello_start, user_hello_end },
+    { "нарушитель", user_rogue_start, user_rogue_end },
+    { "счёт",       user_spin_start,  user_spin_end  },
+    { "двойник",    user_twin_start,  user_twin_end  },
+    { "разовая",    user_once_start,  user_once_end  },
+    { "запускала",  user_boss_start,  user_boss_end  },
+};
+
+s64 uspace_spawn_image(u32 index)
+{
+    if (index >= ARRAY_SIZE(images))
+        return -1;
+
+    return uspace_spawn(images[index].name, images[index].start,
+                        (u64)(images[index].end - images[index].start));
 }

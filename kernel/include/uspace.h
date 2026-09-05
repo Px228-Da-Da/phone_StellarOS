@@ -18,8 +18,19 @@
  * следующий шаг, ему нужен свой корень таблиц на каждую программу.
  */
 
-/* Запустить программу. Возвращает 0, если задача создана. */
-int uspace_spawn(const char *name, const void *image, u64 size);
+/*
+ * Запустить программу. Возвращает номер созданной задачи или
+ * отрицательное значение, если не вышло.
+ */
+s64 uspace_spawn(const char *name, const void *image, u64 size);
+
+/*
+ * Запустить программу из вшитых в образ — по номеру из общего с EL0
+ * списка (см. IMG_* в syscall.h). Отсюда же берёт программы системный
+ * вызов SYS_SPAWN: списка файлов у нас пока нет, а имя, пришедшее из
+ * EL0, всё равно пришлось бы сверять с этим же списком.
+ */
+s64 uspace_spawn_image(u32 index);
 
 /* Программы, вшитые в образ. Границы расставляет ассемблер, см. user.S */
 extern const u8 user_hello_start[];
@@ -32,5 +43,7 @@ extern const u8 user_twin_start[];
 extern const u8 user_twin_end[];
 extern const u8 user_once_start[];
 extern const u8 user_once_end[];
+extern const u8 user_boss_start[];
+extern const u8 user_boss_end[];
 
 #endif

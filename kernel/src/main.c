@@ -1370,25 +1370,23 @@ void kmain(u64 dtb_phys)
     /*
      * Программы в пользовательском режиме.
      *
-     * Первая здоровается и спит — то есть пользуется системными
-     * вызовами и планировщиком. Вторая лезет в память ядра и должна
-     * быть снята процессором: система при этом обязана продолжить
-     * работу, и именно это стоит увидеть в логе.
+     * Здороваются, считают, проверяют раздельность пространств и
+     * запускают друг друга. Ядро заводит их по номерам из общего с EL0
+     * списка — того же, которым пользуется системный вызов SYS_SPAWN.
      */
-    uspace_spawn("привет-el0", user_hello_start,
-                 (u64)(user_hello_end - user_hello_start));
-    uspace_spawn("нарушитель", user_rogue_start,
-                 (u64)(user_rogue_end - user_rogue_start));
-    uspace_spawn("счёт-el0", user_spin_start,
-                 (u64)(user_spin_end - user_spin_start));
+    uspace_spawn_image(IMG_HELLO);
+    uspace_spawn_image(IMG_SPIN);
 
     /* Двойники: одна и та же программа по одному и тому же адресу в двух
      * пространствах. Если раздельность где-то сломана, они это заметят
      * друг о друге раньше, чем мы — по дескрипторам. */
-    uspace_spawn("двойник-1", user_twin_start,
-                 (u64)(user_twin_end - user_twin_start));
-    uspace_spawn("двойник-2", user_twin_start,
-                 (u64)(user_twin_end - user_twin_start));
+    uspace_spawn_image(IMG_TWIN);
+    uspace_spawn_image(IMG_TWIN);
+
+    /* Запускала сама заведёт и обычную программу, и нарушителя, и
+     * дождётся обоих: отдельно нарушителя отсюда запускать больше не
+     * нужно. */
+    uspace_spawn_image(IMG_BOSS);
 
     /* Сборщик и проверка того, что после него память возвращается */
     sched_start_reaper();
@@ -1742,8 +1740,7 @@ static void respawn_task(void *arg)
             RESPAWN_COUNT, before);
 
     for (u32 i = 0; i < RESPAWN_COUNT; i++) {
-        uspace_spawn("разовая", user_once_start,
-                     (u64)(user_once_end - user_once_start));
+        uspace_spawn_image(IMG_ONCE);
         task_sleep_ms(150);
     }
 

@@ -307,3 +307,121 @@ user_once_start:
 .align 4
 .global user_once_end
 user_once_end:
+
+/* ---------------------------------------------------------------------
+ * Шестая программа: запускала.
+ *
+ * Первая программа, которая распоряжается другими: запускает их и
+ * дожидается конца. До неё всё запускалось ядром при старте, то есть
+ * пользовательский режим был местом, куда система кого-то помещает.
+ * Теперь это место, откуда можно управлять.
+ *
+ * Запускает двоих. Первый честно отрабатывает и завершается сам —
+ * ожидание должно вернуть его код. Второй нарушает границы, и его
+ * снимает ядро — ожидание должно вернуть особый код, отличимый от
+ * любого, который программа могла бы назначить себе сама. Разница между
+ * этими двумя ответами и есть то, ради чего всё делалось.
+ */
+.align 4
+.global user_boss_start
+user_boss_start:
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_hello
+    mov     x1, #(boss_hello_end - boss_hello)
+    svc     #0
+
+    /* --- первый: обычная программа --- */
+    mov     x8, #SYS_SPAWN
+    mov     x0, #IMG_ONCE
+    svc     #0
+    tbnz    x0, #63, boss_failed        /* отрицательный ответ — не вышло */
+    mov     x19, x0
+
+    mov     x8, #SYS_WAIT
+    mov     x0, x19
+    svc     #0
+    cbnz    x0, boss_first_bad
+
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_first_ok
+    mov     x1, #(boss_first_ok_end - boss_first_ok)
+    svc     #0
+    b       boss_second
+
+boss_first_bad:
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_first_odd
+    mov     x1, #(boss_first_odd_end - boss_first_odd)
+    svc     #0
+
+    /* --- второй: нарушитель, его должно снять ядро --- */
+boss_second:
+    mov     x8, #SYS_SPAWN
+    mov     x0, #IMG_ROGUE
+    svc     #0
+    tbnz    x0, #63, boss_failed
+    mov     x19, x0
+
+    mov     x8, #SYS_WAIT
+    mov     x0, x19
+    svc     #0
+    cmp     x0, #EXIT_KILLED
+    b.ne    boss_second_odd
+
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_second_ok
+    mov     x1, #(boss_second_ok_end - boss_second_ok)
+    svc     #0
+
+    mov     x8, #SYS_EXIT
+    mov     x0, #0
+    svc     #0
+    b       .
+
+boss_second_odd:
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_second_bad
+    mov     x1, #(boss_second_bad_end - boss_second_bad)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #7
+    svc     #0
+    b       .
+
+boss_failed:
+    mov     x8, #SYS_WRITE
+    adr     x0, boss_nostart
+    mov     x1, #(boss_nostart_end - boss_nostart)
+    svc     #0
+    mov     x8, #SYS_EXIT
+    mov     x0, #8
+    svc     #0
+    b       .
+
+boss_hello:
+    .ascii  "EL0      : ЗАПУСКАЛА: БЕРУСЬ ЗА ДВОИХ\n"
+boss_hello_end:
+
+boss_first_ok:
+    .ascii  "EL0      : ЗАПУСКАЛА: ПЕРВЫЙ ОТРАБОТАЛ САМ, КОД 0\n"
+boss_first_ok_end:
+
+boss_first_odd:
+    .ascii  "EL0      : ЗАПУСКАЛА: ПЕРВЫЙ ВЕРНУЛ ЧТО-ТО НЕ ТО\n"
+boss_first_odd_end:
+
+boss_second_ok:
+    .ascii  "EL0      : ЗАПУСКАЛА: ВТОРОГО СНЯЛО ЯДРО, ЖДАЛА ИМЕННО ЭТОГО\n"
+boss_second_ok_end:
+
+boss_second_bad:
+    .ascii  "EL0      : ЗАПУСКАЛА: ВТОРОЙ ВЕРНУЛСЯ САМ — ЗАЩИТА НЕ СРАБОТАЛА\n"
+boss_second_bad_end:
+
+boss_nostart:
+    .ascii  "EL0      : ЗАПУСКАЛА: ЯДРО НЕ ДАЛО ЗАПУСТИТЬ ПРОГРАММУ\n"
+boss_nostart_end:
+
+.align 4
+.global user_boss_end
+user_boss_end:

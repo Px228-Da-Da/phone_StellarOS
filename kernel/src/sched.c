@@ -49,6 +49,24 @@ static struct task *rq_head;
 static struct task *rq_tail;
 static struct task *all_head;
 static struct task *zombie_head;    /* отработали, ждут разбора          */
+
+/*
+ * Журнал завершившихся.
+ *
+ * Ждущему нужен код завершения, а самой задачи к моменту вопроса может
+ * уже не быть — её разобрал сборщик. Держать ради этого зомби до тех
+ * пор, пока кто-нибудь не спросит, нельзя: спросить могут никогда, и
+ * тогда память не вернётся. Кольцевой журнал решает обе задачи разом:
+ * ответ переживает саму задачу, но не навсегда.
+ */
+#define EXIT_LOG_SIZE   32
+
+static struct {
+    u64 id;
+    u64 code;
+    int filled;
+} exit_log[EXIT_LOG_SIZE];
+static u32 exit_log_next;
 static u64 next_id;
 static u64 task_count;
 
@@ -225,6 +243,57 @@ struct task *task_create_space(const char *name, task_fn fn, void *arg,
     spin_unlock_irq(&rq_lock, flags);
 
     return t;
+}
+
+/* Записать, чем кончилась задача. Зовётся с закрытыми прерываниями. */
+static void remember_exit(u64 id, u64 code)
+{
+    u64 flags = spin_lock_irq(&rq_lock);
+
+    exit_log[exit_log_next].id = id;
+    exit_log[exit_log_next].code = code;
+    exit_log[exit_log_next].filled = 1;
+    exit_log_next = (exit_log_next + 1) % EXIT_LOG_SIZE;
+    spin_unlock_irq(&rq_lock, flags);
+}
+
+int sched_exit_code(u64 id, u64 *code)
+{
+    int found = 0;
+    u64 flags = spin_lock_irq(&rq_lock);
+
+    for (u32 i = 0; i < EXIT_LOG_SIZE; i++) {
+        if (!exit_log[i].filled || exit_log[i].id != id)
+            continue;
+        if (code)
+            *code = exit_log[i].code;
+        found = 1;
+        break;
+    }
+
+    spin_unlock_irq(&rq_lock, flags);
+    return found;
+}
+
+int sched_task_alive(u64 id)
+{
+    int alive = 0;
+    u64 flags = spin_lock_irq(&rq_lock);
+
+    for (struct task *t = all_head; t; t = t->all_next) {
+        if (t->id == id && t->state != TASK_DONE) {
+            alive = 1;
+            break;
+        }
+    }
+
+    spin_unlock_irq(&rq_lock, flags);
+    return alive;
+}
+
+u64 task_id_of(const struct task *t)
+{
+    return t ? t->id : 0;
 }
 
 /*
@@ -410,12 +479,19 @@ void task_sleep_ms(u64 ms)
 
 void task_exit(void)
 {
+    task_exit_code(0);
+}
+
+void task_exit_code(u64 code)
+{
     struct cpu *c;
     u64 flags = irq_save();
 
     c = this_cpu();
-    if (c->current)
+    if (c->current) {
         c->current->state = TASK_DONE;
+        remember_exit(c->current->id, code);
+    }
     irq_restore(flags);
 
     /* Стек завершённой задачи пока не освобождаем: он у нас под ногами,
