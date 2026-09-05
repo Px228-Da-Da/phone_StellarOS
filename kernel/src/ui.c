@@ -267,51 +267,91 @@ static void layers_init(void)
  * раз, а дальше только перемещается — а перемещение это одна запись в
  * регистр, ради чего аппаратная композиция и нужна.
  */
-static int hl_tile = -1;
-static int dot_on;
+/*
+ * Состояние слоёв: чего мы хотим и что уже применено.
+ *
+ * Разделение не от лишней аккуратности. События приходят сто раз в
+ * секунду, а кадров шестьдесят, и правка регистра посреди вывода даёт
+ * ровно то, что было видно на записи: верх кадра успевает уйти со старым
+ * смещением слоя, низ — уже с новым, и под пальцем оказывается не одна
+ * точка, а две-три подряд. Поэтому сначала копим желаемое, а применяем
+ * один раз за проход и только в окне между кадрами.
+ */
+static int hl_tile = -1;            /* подсвечено сейчас   */
+static int hl_want = -1;            /* хотим подсветить    */
+static int dot_on;                  /* точка показана      */
+static int dot_want;                /* хотим показать      */
+static u32 dot_x, dot_y;            /* где показана        */
+static u32 dot_wx, dot_wy;          /* где хотим           */
 
 static void highlight(int tile)
 {
-    u32 x, y;
-
-    if (!layers_ready || tile == hl_tile)
-        return;
-    if (tile < 0) {
-        ovl_layer_off(1);
-        hl_tile = -1;
-        return;
-    }
-    tile_rect(tile, &x, &y);
-    if (hl_tile < 0)
-        ovl_layer_set(1, layer_hl, x, y, tile_w, TILE_H, tile_w * 4, 140);
-    else
-        ovl_layer_move(1, x, y);
-    hl_tile = tile;
+    hl_want = tile;
 }
 
-static void dot_show(u32 x, u32 y)
+static void dot_at(u32 x, u32 y)
 {
     u32 half = DOT_SIZE / 2;
-    u32 dx = x > half ? x - half : 0;
-    u32 dy = y > half ? y - half : 0;
 
-    if (!layers_ready)
-        return;
-    if (!dot_on) {
-        ovl_layer_set(2, layer_dot, dx, dy,
-                      DOT_SIZE, DOT_SIZE, DOT_SIZE * 4, 200);
-        dot_on = 1;
-    } else {
-        ovl_layer_move(2, dx, dy);
-    }
+    dot_wx = x > half ? x - half : 0;
+    dot_wy = y > half ? y - half : 0;
+    dot_want = 1;
 }
 
 static void dot_hide(void)
 {
-    if (!layers_ready || !dot_on)
+    dot_want = 0;
+}
+
+/*
+ * Применить накопленное.
+ *
+ * Ждём окно между кадрами один раз и только если есть что менять. Дальше
+ * правим регистры: перемещение слоя — одна запись, и все правки
+ * укладываются в окно с огромным запасом, оно около восьмидесяти пяти
+ * микросекунд.
+ */
+static void layers_commit(void)
+{
+    int hl_change  = (hl_want != hl_tile);
+    int dot_change = (dot_want != dot_on) ||
+                     (dot_want && (dot_wx != dot_x || dot_wy != dot_y));
+
+    if (!layers_ready || (!hl_change && !dot_change))
         return;
-    ovl_layer_off(2);
-    dot_on = 0;
+
+    fb_wait_frame_gap();
+
+    if (hl_change) {
+        if (hl_want < 0) {
+            ovl_layer_off(1);
+        } else {
+            u32 x, y;
+
+            tile_rect(hl_want, &x, &y);
+            if (hl_tile < 0)
+                ovl_layer_set(1, layer_hl, x, y,
+                              tile_w, TILE_H, tile_w * 4, 140);
+            else
+                ovl_layer_move(1, x, y);
+        }
+        hl_tile = hl_want;
+    }
+
+    if (dot_change) {
+        if (dot_want && !dot_on) {
+            ovl_layer_set(2, layer_dot, dot_wx, dot_wy,
+                          DOT_SIZE, DOT_SIZE, DOT_SIZE * 4, 200);
+            dot_on = 1;
+        } else if (dot_want) {
+            ovl_layer_move(2, dot_wx, dot_wy);
+        } else {
+            ovl_layer_off(2);
+            dot_on = 0;
+        }
+        dot_x = dot_wx;
+        dot_y = dot_wy;
+    }
 }
 
 /* --- Задача оболочки ---------------------------------------------- */
@@ -357,7 +397,7 @@ static void ui_task(void *arg)
                 continue;
             }
 
-            dot_show(e.x, e.y);
+            dot_at(e.x, e.y);
 
             if (e.action == TOUCH_DOWN) {
                 touches++;
@@ -370,6 +410,11 @@ static void ui_task(void *arg)
                 highlight(tile_at(e.x, e.y) == pressed ? pressed : -1);
             }
         }
+
+        /* Правки слоёв — один раз за проход и в окне между кадрами.
+         * Внутри цикла разбора событий их делать нельзя: событий больше,
+         * чем кадров, и слой успел бы переехать посреди вывода. */
+        layers_commit();
 
         if (redraw_detail)
             draw_detail();
