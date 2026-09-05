@@ -25,6 +25,14 @@ void fb_clear(u32 color);
 void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color);
 void fb_putc(char c);                   /* текстовая консоль поверх fb */
 void fb_set_colors(u32 fg, u32 bg);
+
+/*
+ * Текст в произвольном месте кадра — для интерфейса, а не для консоли.
+ * scale: во сколько раз растянуть глиф 8x8.
+ * bg с нулевой альфой — прозрачный фон: закрашиваются только буквы.
+ */
+void fb_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s);
+u32  fb_text_width(u32 scale, const char *s);
 void fb_info(u64 *base, u32 *w, u32 *h, u32 *stride);
 
 /*

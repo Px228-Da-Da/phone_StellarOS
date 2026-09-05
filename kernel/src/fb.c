@@ -597,6 +597,99 @@ static void draw_glyph(u32 cp, u32 px, u32 py)
 }
 
 /*
+ * Текст в произвольном месте кадра.
+ *
+ * Консольный вывод умеет только «следующий символ в следующей позиции», и
+ * для интерфейса этого мало: подпись на кнопке должна лечь туда, где эта
+ * кнопка, и своим размером.
+ *
+ * Прозрачный фон задаётся нулевой альфой: тогда закрашиваются только
+ * пиксели самих букв, а картинка под ними остаётся. Сплошной прямоугольник
+ * под каждой подписью выглядел бы заплаткой.
+ */
+static void draw_glyph_ex(u32 cp, u32 px, u32 py, u32 scale,
+                          u32 fg, u32 bg, int opaque_bg)
+{
+    const u8 *glyph = glyph_for(cp);
+
+    for (u32 row = 0; row < 8; row++) {
+        u8 bits = glyph[row];
+
+        for (u32 col = 0; col < 8; col++) {
+            int on = (bits & (0x80 >> col)) != 0;
+
+            if (!on && !opaque_bg)
+                continue;
+            for (u32 sy = 0; sy < scale; sy++) {
+                u32 y = py + row * scale + sy;
+
+                if (y >= fb.height)
+                    return;
+                for (u32 sx = 0; sx < scale; sx++) {
+                    u32 x = px + col * scale + sx;
+
+                    if (x >= fb.width)
+                        break;
+                    fb.base[(u64)y * fb.stride_px + x] = on ? fg : bg;
+                }
+            }
+        }
+    }
+}
+
+/*
+ * Разбор UTF-8 для строки.
+ *
+ * Тот же случай, что и в консоли: текст ядра в UTF-8, кириллица занимает
+ * два байта. Здесь строка известна целиком, поэтому автомат не нужен —
+ * просто читаем ведущий байт и, если он двухбайтовый, забираем второй.
+ */
+static u32 utf8_next(const char **s)
+{
+    const u8 *p = (const u8 *)*s;
+    u32 b = *p++;
+
+    if (b >= 0xC0 && b <= 0xDF && (*p & 0xC0) == 0x80) {
+        u32 cp = ((b & 0x1F) << 6) | (*p & 0x3F);
+
+        p++;
+        *s = (const char *)p;
+        return cp;
+    }
+    *s = (const char *)p;
+    return b;
+}
+
+u32 fb_text_width(u32 scale, const char *s)
+{
+    u32 n = 0;
+
+    if (!s || !scale)
+        return 0;
+    while (*s) {
+        utf8_next(&s);
+        n++;
+    }
+    return n * 8 * scale;
+}
+
+void fb_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
+{
+    int opaque_bg = (bg >> 24) != 0;
+
+    if (!fb.ready || !s || !scale)
+        return;
+    while (*s) {
+        u32 cp = utf8_next(&s);
+
+        if (x + 8 * scale > fb.width)
+            break;
+        draw_glyph_ex(cp, x, y, scale, fg, bg, opaque_bg);
+        x += 8 * scale;
+    }
+}
+
+/*
  * Вывод символа.
  *
  * На вход приходят БАЙТЫ, а текст ядра в UTF-8, где кириллица занимает два

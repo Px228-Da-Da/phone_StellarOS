@@ -26,6 +26,8 @@
 #include "spi.h"
 #include "nvt.h"
 #include "ovl.h"
+#include "input.h"
+#include "ui.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -1173,7 +1175,10 @@ void kmain(u64 dtb_phys)
     spi_clk_enable();
     spi_pins_setup();
     nvt_probe();
-    touch_demo(HALT_AT_OR_ZERO ? 3 : 15);
+    /* Опрос касаний больше не занимает загрузку: он стал задачей
+     * планировщика, а этот показ оставлен только для отладки. */
+    if (HALT_AT_OR_ZERO)
+        touch_demo(3);
 
     if (10 == HALT_AT_OR_ZERO)
         fb_flip_probe();
@@ -1276,7 +1281,10 @@ void kmain(u64 dtb_phys)
 
     fb_flip_demo();
     kprint_to_fb(0);     /* кадр нужен под слои, а не под текст */
-    ovl_demo();
+    /* Показ слоёв тоже под отладку: в обычной работе слои заняты
+     * оболочкой, и две демонстрации мешали бы друг другу. */
+    if (HALT_AT_OR_ZERO)
+        ovl_demo();
     kprint_to_fb(1);
     HALT_STAGE(9);                          /* замереть после демонстрации */
 
@@ -1318,6 +1326,13 @@ void kmain(u64 dtb_phys)
         task_create(worker_names[i], worker_task, &workers[i]);
     }
     task_create("пульс", heartbeat_task, NULL);
+
+    /* Ввод и оболочка. Порядок важен: оболочка сразу забирает экран у
+     * отладочного вывода, поэтому запускаем её последней — всё, что
+     * печаталось до этого, успевает лечь на экран и остаётся видимым,
+     * пока она не нарисует первый кадр. */
+    input_start();
+    ui_start();
 
     kprintf("\nBOOT OK. ЗАДАЧИ ПОШЛИ:\n");
 
