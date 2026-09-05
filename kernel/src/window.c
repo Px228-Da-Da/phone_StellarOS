@@ -427,17 +427,20 @@ int window_present(u32 x, u32 y)
     return rc;
 }
 
-int window_text(u32 x, u32 y, u32 scale, u32 fg, const char *s)
+int window_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
     struct window *win = window_of(task_id());
 
     if (!win || !win->buf || !scale || scale > 8)
         return -1;
 
-    /* Фон прозрачный: программа сама решает, чем заливать окно, и
-     * затирать её работу прямоугольником под каждой строкой мы не
-     * вправе. */
-    fb_text_to(win->buf, win->w, win->w, win->h, x, y, scale, fg, 0, s);
+    /*
+     * Фон решает программа, а не мы. Прозрачный (нулевая прозрачность)
+     * означает «писать только буквы» — годится, когда под ними уже
+     * лежит нужное. Непрозрачный закрашивает строку целиком за один
+     * проход, и это единственный способ менять надпись без мигания.
+     */
+    fb_text_to(win->buf, win->w, win->w, win->h, x, y, scale, fg, bg, s);
     return 0;
 }
 

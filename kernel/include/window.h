@@ -63,7 +63,7 @@ int  window_present(u32 x, u32 y);
  * Рисуем мы при этом в её собственный буфер — то есть делаем ровно то,
  * что программа могла бы сделать сама, будь у неё шрифт.
  */
-int  window_text(u32 x, u32 y, u32 scale, u32 fg, const char *s);
+int  window_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s);
 
 /*
  * Закрыть своё окно, не завершаясь.

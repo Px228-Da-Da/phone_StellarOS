@@ -94,7 +94,14 @@ $(BUILD)/%.o: src/%.S | $(BUILD)
 $(BUILD)/user:
 	@mkdir -p $(BUILD)/user
 
-$(BUILD)/user/%.elf: user/%.c user/user.ld | $(BUILD)/user
+# Заголовки программ перечислены явно: у пользовательских образов нет
+# автоматического учёта зависимостей, и правка ulib.h или общего
+# заголовка вызовов иначе не пересобрала бы ни одной программы. Молча —
+# а значит с расхождением между тем, что зовёт программа, и тем, что
+# ждёт ядро.
+USER_DEPS := user/ulib.h include/syscall.h user/user.ld
+
+$(BUILD)/user/%.elf: user/%.c $(USER_DEPS) | $(BUILD)/user
 	$(CC) $(CFLAGS) -Iuser -static -T user/user.ld -o $@ $<
 
 $(BUILD)/user/%.bin: $(BUILD)/user/%.elf

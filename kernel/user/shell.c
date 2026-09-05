@@ -45,6 +45,10 @@ static int chosen;                  /* какая выбрана             */
 static u64 touches;
 static char line[96];
 
+/* Что уже показано в строке состояния: перерисовываем только на разницу */
+static u64 shown_touches, shown_sec;
+static int shown_chosen;
+
 static const char *const tile_name[TILE_COUNT] = {
     "ЭКРАН", "КАСАНИЯ", "ПАМЯТЬ", "ЯДРА", "ОКНА", "О СИСТЕМЕ",
 };
@@ -87,62 +91,62 @@ static void draw_tile(u32 i)
     tile_rect(i, &x, &y);
     urect(win, sw, x, y, tile_w, TILE_H, body);
     uframe(win, sw, x, y, tile_w, TILE_H, 2, COL_EDGE);
+    /* Подпись — с непрозрачным фоном плитки: один проход по тем же
+     * пикселям вместо «стереть, потом написать». */
     text(x + 20, y + 22, 3, ((int)i == chosen) ? COL_WHITE : COL_TEXT,
-         tile_name[i]);
+         body, tile_name[i]);
 }
 
-/* Строка внизу: что выбрано и сколько было касаний */
+/*
+ * Строка внизу: что выбрано и сколько было касаний.
+ *
+ * Ни одного стирания. Раньше здесь сначала закрашивался прямоугольник, а
+ * потом писался текст — и между этими двумя действиями контроллер
+ * дисплея успевал вывести кадр, в котором область пустая. Это и было
+ * мигание, тем более заметное, что перерисовывалось оно на каждое
+ * событие ведения, то есть десятки раз в секунду.
+ *
+ * Теперь каждая строка пишется с непрозрачным фоном и дополняется
+ * пробелами до постоянной ширины: каждый пиксель меняется ровно один
+ * раз, пустого промежуточного состояния не возникает, а хвост прежней
+ * надписи затирается пробелами.
+ */
+static void copy_str(char *dst, const char *src, u32 max)
+{
+    u32 i = 0;
+
+    while (src[i] && i < max - 1) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
 static void draw_status(void)
 {
     u32 y = TITLE_H + 3 * (TILE_H + GAP) + 20;
 
-    urect(win, sw, MARGIN, y, sw - 2 * MARGIN, STATUS_H * 2, COL_BG);
-
-    if (chosen >= 0)
-        text(MARGIN, y, 2, COL_TEXT, tile_note[chosen]);
-    else
-        text(MARGIN, y, 2, COL_DIM, "НАЖМИ НА ПЛИТКУ");
+    copy_str(line, chosen >= 0 ? tile_note[chosen] : "НАЖМИ НА ПЛИТКУ",
+             sizeof(line));
+    upad(line, 46);
+    text(MARGIN, y, 2, chosen >= 0 ? COL_TEXT : COL_DIM, COL_BG, line);
 
     ulabel(line, "КАСАНИЙ ", touches);
-    text(MARGIN, y + 34, 2, COL_DIM, line);
+    upad(line, 14);
+    text(MARGIN, y + 34, 2, COL_DIM, COL_BG, line);
 
     ulabel(line, "СЕКУНД ", uptime_ms() / 1000);
-    text(MARGIN + 260, y + 34, 2, COL_DIM, line);
+    upad(line, 14);
+    text(MARGIN + 260, y + 34, 2, COL_DIM, COL_BG, line);
 }
 
 static void draw_all(void)
 {
     ufill(win, sw * sh, COL_BG);
 
-    text(MARGIN, 28, 6, COL_WHITE, "VELO-OS");
-    text(MARGIN, 92, 2, COL_DIM, "ОБОЛОЧКА В ПОЛЬЗОВАТЕЛЬСКОМ РЕЖИМЕ");
+    text(MARGIN, 28, 6, COL_WHITE, 0, "VELO-OS");
+    text(MARGIN, 92, 2, COL_DIM, 0, "ОБОЛОЧКА В ПОЛЬЗОВАТЕЛЬСКОМ РЕЖИМЕ");
 
-    /*
-     * Образцы известных цветов.
-     *
-     * На телефоне окно выглядело синим и просвечивающим, а по числам в
-     * буфере этого не видно: там ровно те цвета, что мы написали.
-     * Значит расходится не значение, а его толкование железом — какой
-     * байт считается красным, какой прозрачностью. Четыре образца с
-     * подписями отвечают на это одной фотографией.
-     *
-     * Порядок подписей и есть проверка: если «КРАСНЫЙ» окажется синим,
-     * байты разложены не так, как мы думаем.
-     */
-    {
-        u32 y = 120;
-        u32 w = (sw - 2 * MARGIN) / 4;
-
-        urect(win, sw, MARGIN + 0 * w, y, w - 4, 26, 0xFFFF0000);
-        urect(win, sw, MARGIN + 1 * w, y, w - 4, 26, 0xFF00FF00);
-        urect(win, sw, MARGIN + 2 * w, y, w - 4, 26, 0xFF0000FF);
-        urect(win, sw, MARGIN + 3 * w, y, w - 4, 26, 0xFFFFFFFF);
-
-        text(MARGIN + 0 * w, y + 30, 1, COL_WHITE, "КРАСНЫЙ");
-        text(MARGIN + 1 * w, y + 30, 1, COL_WHITE, "ЗЕЛЁНЫЙ");
-        text(MARGIN + 2 * w, y + 30, 1, COL_WHITE, "СИНИЙ");
-        text(MARGIN + 3 * w, y + 30, 1, COL_WHITE, "БЕЛЫЙ");
-    }
 
     for (u32 i = 0; i < TILE_COUNT; i++)
         draw_tile(i);
@@ -157,6 +161,7 @@ void _start(void)
 
     pressed = -1;
     chosen = -1;
+    shown_chosen = -1;
 
     screen_size(&sw, &sh);
     if (!sw || !sh) {
@@ -239,7 +244,19 @@ void _start(void)
                 draw_tile((u32)chosen);
         }
 
-        draw_status();
+        /*
+         * Перерисовываем состояние только когда ему есть что показать
+         * заново. Ведение пальцем меняет координаты, а не содержимое
+         * строки: перерисовывать её на каждое такое событие — тратить
+         * работу и мигать без причины.
+         */
+        if (touches != shown_touches || chosen != shown_chosen ||
+            uptime_ms() / 1000 != shown_sec) {
+            shown_touches = touches;
+            shown_chosen = chosen;
+            shown_sec = uptime_ms() / 1000;
+            draw_status();
+        }
         (void)last_sec;
     }
 }
