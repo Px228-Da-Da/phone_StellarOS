@@ -47,7 +47,6 @@
 
 /* Сколько ждать завершения. Величина с запасом: восемь байт на 100 кГц
  * идут около миллисекунды, а мы крутим пустой цикл. */
-#define I2C_TIMEOUT_SPINS   2000000
 
 static void i2c_prepare(u32 base)
 {
@@ -69,19 +68,35 @@ u32 i2c_last_stat;
 u32 i2c_last_spins;
 u32 i2c_stat_before;
 
-/* Ждём завершения. Возвращает биты статуса или 0 при таймауте. */
+/*
+ * Ждём завершения. Возвращает биты статуса или 0 при таймауте.
+ *
+ * Срок отмеряем по системному счётчику, а не витками цикла. Витки — это
+ * не время: два миллиона обращений к регистру занимают от полусекунды до
+ * двух, и предсказать сколько именно нельзя. Из-за этого одна неудачная
+ * посылка замораживала интерфейс на секунды, а выглядело это как
+ * необъяснимое зависание.
+ *
+ * Двадцать миллисекунд — с огромным запасом: посылка в несколько байт на
+ * четырёхстах килогерцах идёт меньше миллисекунды.
+ */
 static u32 i2c_wait(u32 base)
 {
-    for (u32 i = 0; i < I2C_TIMEOUT_SPINS; i++) {
+    u64 freq = read_cntfrq();
+    u64 deadline = read_cntpct() + (freq / 1000) * 20;
+    u32 spins = 0;
+
+    while (read_cntpct() < deadline) {
         u32 st = mmio_read32(base + I2C_INTR_STAT);
 
+        spins++;
         if (st & (INTR_TRANSAC_COMP | INTR_ACKERR | INTR_HS_NACKERR)) {
-            i2c_last_spins = i;
+            i2c_last_spins = spins;
             i2c_last_stat = st;
             return st;
         }
     }
-    i2c_last_spins = I2C_TIMEOUT_SPINS;
+    i2c_last_spins = spins;
     i2c_last_stat = 0;
     return 0;
 }

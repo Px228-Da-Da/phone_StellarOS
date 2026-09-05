@@ -110,6 +110,36 @@ static void str_cat(char *dst, u32 cap, const char *src)
     dst[n] = 0;
 }
 
+/*
+ * Строка фиксированной ширины.
+ *
+ * Раньше меняющийся текст рисовался в два приёма: стереть прямоугольник,
+ * потом нарисовать буквы. Между этими действиями контроллер дисплея
+ * успевает вывести кадр — и в нём область пустая. Отсюда мигание. А если
+ * новая строка короче старой, её хвост остаётся на экране: отсюда буквы
+ * поверх букв.
+ *
+ * Лечится тем, что каждый пиксель пишется ровно один раз: строка
+ * дополняется пробелами до нужной ширины и рисуется с непрозрачным фоном.
+ * Промежуточного состояния, в котором пусто, просто не возникает.
+ */
+static void draw_line(u32 x, u32 y, u32 scale, u32 fg,
+                      const char *text, u32 width_px)
+{
+    char buf[128];
+    u32 n = 0;
+
+    while (text[n] && n < sizeof(buf) - 2)
+        buf[n] = text[n], n++;
+    buf[n] = 0;
+
+    while (n < sizeof(buf) - 2 && fb_text_width(scale, buf) < width_px) {
+        buf[n++] = ' ';
+        buf[n] = 0;
+    }
+    fb_text(x, y, scale, fg, UI_BG, buf);
+}
+
 static void tile_rect(int i, u32 *x, u32 *y)
 {
     *x = MARGIN + (u32)(i % COLS) * (tile_w + GAP);
@@ -207,22 +237,62 @@ static void update_trend(u32 mv)
     batt_ref_ms = now;
 }
 
+/*
+ * Опрос питания — в своей задаче, а не в оболочке.
+ *
+ * Причина не в стройности, а в том, что железо отвечает не мгновенно:
+ * измерение батареи занимает полторы миллисекунды, а опрос контроллера
+ * заряда — шесть посылок по I2C, и любая из них может не дойти. Пока это
+ * делалось прямо в оболочке, неудачная посылка замораживала интерфейс.
+ *
+ * Теперь оболочка читает только готовые числа и не ждёт никого.
+ */
+static struct battery_state power_batt;
+static const char *power_stage = "";
+static const char *power_port = "";
+static u32 power_input_ma;
+
+static void power_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        struct battery_state st;
+
+        battery_read(&st);
+        if (st.valid) {
+            update_trend(st.mv);
+            if (st.charging) {
+                /* Порядок важен: stage опрашивает контроллер и заодно
+                 * обновляет то, что читают две другие функции. */
+                const char *stage = charger_stage_text();
+
+                power_port = charger_port_text();
+                power_input_ma = charger_input_ma();
+                power_stage = stage;
+            } else {
+                power_stage = "";
+                power_port = "";
+                power_input_ma = 0;
+            }
+        }
+        power_batt = st;
+
+        /* Раз в две секунды: чаще незачем, а каждое обращение к железу
+         * стоит времени и немного тока. */
+        task_sleep_ms(2000);
+    }
+}
+
 static void draw_battery(void)
 {
-    struct battery_state st;
+    struct battery_state st = power_batt;
     char line[80];
     char num[24];
     u32 color;
 
-    battery_read(&st);
-    if (st.valid)
-        update_trend(st.mv);
-
-    fb_fill_rect(MARGIN, BATT_Y, scr_w - 2 * MARGIN, 70, UI_BG);
-
     if (!st.valid) {
-        fb_text(MARGIN, BATT_Y + 12, 3, UI_DIM, UI_TRANSPARENT,
-                "БАТАРЕЯ: НЕ ОТВЕЧАЕТ");
+        draw_line(MARGIN, BATT_Y + 12, 3, UI_DIM,
+                  "БАТАРЕЯ: ЖДУ ЗАМЕРА", scr_w - 2 * MARGIN);
         return;
     }
 
@@ -240,7 +310,7 @@ static void draw_battery(void)
 
     /* Цветом отмечаем только то, что требует внимания: мало заряда. */
     color = st.charging ? UI_ACCENT : (st.percent <= 15 ? 0xFFFF6B6B : UI_TEXT);
-    fb_text(MARGIN, BATT_Y + 12, 3, color, UI_TRANSPARENT, line);
+    draw_line(MARGIN, BATT_Y + 12, 3, color, line, scr_w - 2 * MARGIN);
 
     /*
      * Вторая строка — про сам зарядник.
@@ -250,22 +320,19 @@ static void draw_battery(void)
      * Тип источника контроллер распознаёт сам, и по нему сразу видно,
      * во что упирается ток — в порт компьютера или в наше потребление.
      */
-    if (st.charging) {
-        const char *stage = charger_stage_text();
-        u32 lim = charger_input_ma();
-
-        line[0] = 0;
-        str_cat(line, sizeof(line), charger_port_text());
+    line[0] = 0;
+    if (st.charging && power_stage[0]) {
+        str_cat(line, sizeof(line), power_port);
         str_cat(line, sizeof(line), ", ");
-        str_cat(line, sizeof(line), stage);
-        if (lim) {
+        str_cat(line, sizeof(line), power_stage);
+        if (power_input_ma) {
             str_cat(line, sizeof(line), ", ВХОД ");
-            utoa(lim, num);
+            utoa(power_input_ma, num);
             str_cat(line, sizeof(line), num);
             str_cat(line, sizeof(line), " МА");
         }
-        fb_text(MARGIN, BATT_Y + 12 + 30, 2, UI_DIM, UI_TRANSPARENT, line);
     }
+    draw_line(MARGIN, BATT_Y + 42, 2, UI_DIM, line, scr_w - 2 * MARGIN);
 
     /* В консоль — сырой код АЦП. Спорить о том, верен ли делитель, можно
      * только имея на руках то, что вернуло железо, а не наш пересчёт. */
@@ -287,18 +354,20 @@ static void draw_battery(void)
 static void draw_detail(void)
 {
     u32 w = scr_w - 2 * MARGIN;
+    u32 inner = w - 48;
 
-    draw_frame_rect(MARGIN, DETAIL_Y, w, DETAIL_H, UI_BG, UI_TILE_EDGE);
-
+    /* Рамку рисуем один раз при запуске, дальше меняется только текст —
+     * и он сам закрывает прошлый, потому что идёт с непрозрачным фоном. */
     if (selected < 0) {
-        fb_text(MARGIN + 24, DETAIL_Y + 60, 3, UI_DIM, UI_TRANSPARENT,
-                "НАЖМИ НА ПЛИТКУ");
+        draw_line(MARGIN + 24, DETAIL_Y + 34, 3, UI_DIM, "", inner);
+        draw_line(MARGIN + 24, DETAIL_Y + 90, 2, UI_DIM,
+                  "НАЖМИ НА ПЛИТКУ", inner);
         return;
     }
-    fb_text(MARGIN + 24, DETAIL_Y + 34, 3, UI_ACCENT, UI_TRANSPARENT,
-            tiles[selected].title);
-    fb_text(MARGIN + 24, DETAIL_Y + 90, 2, UI_TEXT, UI_TRANSPARENT,
-            tiles[selected].detail);
+    draw_line(MARGIN + 24, DETAIL_Y + 34, 3, UI_ACCENT,
+              tiles[selected].title, inner);
+    draw_line(MARGIN + 24, DETAIL_Y + 90, 2, UI_TEXT,
+              tiles[selected].detail, inner);
 }
 
 /* Строка состояния внизу: живые числа, обновляется раз в секунду */
@@ -307,8 +376,6 @@ static void draw_status(u32 touches)
     char line[96];
     char num[24];
     u32 y = scr_h - 120;
-
-    fb_fill_rect(MARGIN, y, scr_w - 2 * MARGIN, 40, UI_BG);
 
     line[0] = 0;
     str_cat(line, sizeof(line), "ЯДЕР ");
@@ -324,7 +391,7 @@ static void draw_status(u32 touches)
     utoa(timer_uptime_ms() / 1000, num);
     str_cat(line, sizeof(line), num);
 
-    fb_text(MARGIN, y, 2, UI_DIM, UI_TRANSPARENT, line);
+    draw_line(MARGIN, y, 2, UI_DIM, line, scr_w - 2 * MARGIN);
 }
 
 static void draw_all(void)
@@ -334,6 +401,8 @@ static void draw_all(void)
     draw_battery();
     for (int i = 0; i < TILE_COUNT; i++)
         draw_tile(i);
+    draw_frame_rect(MARGIN, DETAIL_Y, scr_w - 2 * MARGIN, DETAIL_H,
+                    UI_BG, UI_TILE_EDGE);
     draw_detail();
     draw_status(0);
 }
@@ -589,5 +658,8 @@ static void ui_task(void *arg)
 
 void ui_start(void)
 {
+    /* Обычный приоритет: питание не срочно, а вот мешать вводу оно не
+     * должно — обращения к железу тут медленные. */
+    task_create("питание", power_task, NULL);
     task_create_prio("оболочка", ui_task, NULL, TASK_PRIO_UI);
 }

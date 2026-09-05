@@ -33,6 +33,38 @@ static u64 lreg(u32 layer, u32 off)
 }
 
 /*
+ * Прижать слой к границам области вывода.
+ *
+ * Слой обязан помещаться в неё целиком. Стоит ему вылезти за край — и
+ * оверлей показывает не то и не там: на устройстве это выглядело как
+ * обрезанный кусок слоя, появляющийся выше пальца, стоило коснуться
+ * правого края экрана.
+ *
+ * Ограничение железное, поэтому и проверка здесь, в драйвере, а не у
+ * каждого, кто двигает слой: иначе о него спотыкались бы по очереди все.
+ *
+ * Размер области читаем у самого оверлея, а не берём из настроек кадра:
+ * это разные вещи, и совпадать они не обязаны.
+ */
+static void clamp_to_roi(u32 *x, u32 *y, u32 w, u32 h)
+{
+    u32 roi = mmio_read32(MT_DISP_OVL0_BASE + OVL_ROI_SIZE);
+    u32 rw = roi & 0xFFFF;
+    u32 rh = (roi >> 16) & 0xFFFF;
+
+    if (!rw || !rh)
+        return;
+    if (w > rw)
+        w = rw;
+    if (h > rh)
+        h = rh;
+    if (*x + w > rw)
+        *x = rw - w;
+    if (*y + h > rh)
+        *y = rh - h;
+}
+
+/*
  * Формат пикселя берём с живого слоя 0.
  *
  * Загрузчик уже настроил его под тот кадр, который панель показывает
@@ -149,6 +181,7 @@ int ovl_layer_set(u32 layer, const volatile void *buf,
         return -1;
     if (alpha > 255)
         alpha = 255;
+    clamp_to_roi(&x, &y, w, h);
 
     con = ovl_pixel_format()
         | OVL_CON_AEN                       /* прозрачность учитывается */
@@ -183,6 +216,8 @@ int ovl_layer_color(u32 layer, u32 argb, u32 x, u32 y, u32 w, u32 h)
     if (layer == 0 || layer >= OVL_LAYERS || !w || !h)
         return -1;
 
+    clamp_to_roi(&x, &y, w, h);
+
     /* Прозрачность слоя берём из старшего байта цвета: так вызывающему
      * не нужно помнить, что она задаётся отдельно от него. */
     con = ovl_pixel_format()
@@ -203,8 +238,16 @@ int ovl_layer_color(u32 layer, u32 argb, u32 x, u32 y, u32 w, u32 h)
 
 void ovl_layer_move(u32 layer, u32 x, u32 y)
 {
+    u32 size;
+
     if (layer == 0 || layer >= OVL_LAYERS)
         return;
+
+    /* Размер слоя спрашиваем у него самого: вызывающий его уже сообщал
+     * при настройке, и заставлять помнить второй раз незачем. */
+    size = mmio_read32(lreg(layer, OVL_L0_SRC_SIZE));
+    clamp_to_roi(&x, &y, size & 0xFFFF, (size >> 16) & 0xFFFF);
+
     mmio_write32(lreg(layer, OVL_L0_OFFSET), (y << 16) | x);
     dsb();
 }
