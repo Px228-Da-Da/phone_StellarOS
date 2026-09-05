@@ -360,9 +360,23 @@ u32 sched_task_count(void)
     return (u32)task_count;
 }
 
+u64 task_id(void)
+{
+    struct cpu *c = this_cpu();
+
+    return (c && c->current) ? c->current->id : 0;
+}
+
+const char *task_name(void)
+{
+    struct cpu *c = this_cpu();
+
+    return (c && c->current && c->current->name) ? c->current->name : "?";
+}
+
 void sched_dump(void)
 {
-    static const char *state_name[] = { "ГОТОВА", "БЕЖИТ", "КОНЕЦ" };
+    static const char *state_name[] = { "ГОТОВА", "БЕЖИТ", "СПИТ", "КОНЕЦ" };
     u64 flags = spin_lock_irq(&rq_lock);
 
     /* idle-задачи пропускаем: их ровно по одной на ядро, они никогда

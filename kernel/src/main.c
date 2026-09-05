@@ -29,6 +29,8 @@
 #include "input.h"
 #include "ui.h"
 #include "charger.h"
+#include "uspace.h"
+#include "syscall.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -1364,6 +1366,21 @@ void kmain(u64 dtb_phys)
     }
     task_create("пульс", heartbeat_task, NULL);
 
+    /*
+     * Программы в пользовательском режиме.
+     *
+     * Первая здоровается и спит — то есть пользуется системными
+     * вызовами и планировщиком. Вторая лезет в память ядра и должна
+     * быть снята процессором: система при этом обязана продолжить
+     * работу, и именно это стоит увидеть в логе.
+     */
+    uspace_spawn("привет-el0", user_hello_start,
+                 (u64)(user_hello_end - user_hello_start));
+    uspace_spawn("нарушитель", user_rogue_start,
+                 (u64)(user_rogue_end - user_rogue_start));
+    uspace_spawn("счёт-el0", user_spin_start,
+                 (u64)(user_spin_end - user_spin_start));
+
     /* Ввод и оболочка. Порядок важен: оболочка сразу забирает экран у
      * отладочного вывода, поэтому запускаем её последней — всё, что
      * печаталось до этого, успевает лечь на экран и остаётся видимым,
@@ -1677,6 +1694,8 @@ static void heartbeat_task(void *arg)
         kprintf("         СЧЁТ %lu  ПОТЕРЯНО БЕЗ ЗАМКА %lu  СВЕРКА %s\n",
                 counter_locked, counter_locked - counter_racy,
                 counters_agree() ? "ОК" : "РАСХОЖДЕНИЕ");
+        kprintf("         ПРОГРАММ ВЫТЕСНЕНО ПРЯМО В EL0: %lu\n",
+                el0_preempt_count());
 
         if (beat % 50 == 0)
             sched_dump();
