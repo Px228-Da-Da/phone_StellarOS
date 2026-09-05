@@ -128,15 +128,18 @@ static s64 sys_write(u64 uva, u64 len)
  */
 static s64 sys_wait(u64 id)
 {
-    for (;;) {
-        u64 code;
+    u64 code;
 
-        if (sched_exit_code(id, &code))
-            return (s64)code;
-        if (!sched_task_alive(id))
-            return -1;          /* такой задачи нет и не было */
-        task_sleep_ms(10);
-    }
+    /*
+     * Ждать чужую задачу, а не только свою, никто не мешает: родство
+     * задач ядро пока не отслеживает. Наружу это отдаёт только код
+     * завершения — не тайну, но так и запишем, чтобы потом не выглядело
+     * замыслом.
+     */
+    if (!sched_wait_for(id, &code))
+        return -1;              /* такой задачи нет и не было */
+
+    return (s64)code;
 }
 
 static void syscall(struct trapframe *f)

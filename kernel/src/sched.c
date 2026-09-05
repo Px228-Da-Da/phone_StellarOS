@@ -31,6 +31,7 @@ struct task {
     u32 state;
     u32 prio;                   /* больше — важнее, см. sched.h          */
     u64 wake_ms;                /* когда будить, если спит               */
+    u64 wait_chan;              /* чего ждёт, если ждёт события          */
     u32 slice_used;             /* сколько тиков задача уже отработала   */
     u64 slices;                 /* сколько раз получала процессор        */
     u64 last_cpu;
@@ -69,6 +70,10 @@ static struct {
 static u32 exit_log_next;
 static u64 next_id;
 static u64 task_count;
+
+/* Разбудить ждущих канала — определена ниже, а нужна уже в записи
+ * кода завершения */
+static void wake_chan_locked(u64 chan);
 
 static void rq_push(struct task *t)
 {
@@ -254,22 +259,40 @@ static void remember_exit(u64 id, u64 code)
     exit_log[exit_log_next].code = code;
     exit_log[exit_log_next].filled = 1;
     exit_log_next = (exit_log_next + 1) % EXIT_LOG_SIZE;
+
+    /* Под тем же замком, которым закрыта проверка у ждущих: иначе между
+     * их проверкой и сном как раз и уместилось бы это пробуждение. */
+    wake_chan_locked(id);
     spin_unlock_irq(&rq_lock, flags);
 }
 
-int sched_exit_code(u64 id, u64 *code)
+/* Обе проверки — под уже взятым замком: ими пользуется и ожидание */
+static int find_exit_locked(u64 id, u64 *code)
 {
-    int found = 0;
-    u64 flags = spin_lock_irq(&rq_lock);
-
     for (u32 i = 0; i < EXIT_LOG_SIZE; i++) {
         if (!exit_log[i].filled || exit_log[i].id != id)
             continue;
         if (code)
             *code = exit_log[i].code;
-        found = 1;
-        break;
+        return 1;
     }
+
+    return 0;
+}
+
+static int alive_locked(u64 id)
+{
+    for (struct task *t = all_head; t; t = t->all_next)
+        if (t->id == id && t->state != TASK_DONE)
+            return 1;
+
+    return 0;
+}
+
+int sched_exit_code(u64 id, u64 *code)
+{
+    u64 flags = spin_lock_irq(&rq_lock);
+    int found = find_exit_locked(id, code);
 
     spin_unlock_irq(&rq_lock, flags);
     return found;
@@ -277,15 +300,8 @@ int sched_exit_code(u64 id, u64 *code)
 
 int sched_task_alive(u64 id)
 {
-    int alive = 0;
     u64 flags = spin_lock_irq(&rq_lock);
-
-    for (struct task *t = all_head; t; t = t->all_next) {
-        if (t->id == id && t->state != TASK_DONE) {
-            alive = 1;
-            break;
-        }
-    }
+    int alive = alive_locked(id);
 
     spin_unlock_irq(&rq_lock, flags);
     return alive;
@@ -352,13 +368,22 @@ void sched_after_switch(void)
     spin_unlock(&rq_lock);
 }
 
-void schedule(void)
+/*
+ * Переключиться, когда замок очереди УЖЕ взят, а прерывания закрыты.
+ *
+ * Вынесено ради ожидания по событию. Ждущая задача обязана проверить
+ * условие и уснуть, не отпуская замок: отпусти она его между проверкой и
+ * сном — и разбудить её успели бы ровно в этот промежуток, а разбудить
+ * ещё не спящего некого. Задача уснула бы навсегда, и ошибка эта редкая,
+ * плавающая и почти неотлаживаемая.
+ *
+ * flags передаётся вызывающим: маска прерываний обязана лежать на стеке
+ * той задачи, которая её сохранила, — см. хвост этой же функции.
+ */
+static void schedule_locked(u64 flags)
 {
     struct cpu *c;
     struct task *prev, *next;
-    u64 flags = irq_save();
-
-    spin_lock(&rq_lock);
 
     c = this_cpu();
     prev = c->current;
@@ -367,7 +392,8 @@ void schedule(void)
 
     /* idle в очередь не возвращаем: она принадлежит ядру, а не очереди,
      * и попади она туда — другое ядро увело бы чужой загрузочный стек.
-     * Спящую тоже не возвращаем: её вернёт время, а не очередь. */
+     * Спящую и ждущую тоже не возвращаем: первую вернёт время,
+     * вторую — событие. */
     if (prev && prev != c->idle && prev->state == TASK_RUNNING) {
         prev->state = TASK_READY;
         rq_push(prev);
@@ -435,6 +461,77 @@ void schedule(void)
     take_dying();
     spin_unlock(&rq_lock);
     irq_restore(flags);
+}
+
+void schedule(void)
+{
+    u64 flags = irq_save();
+
+    spin_lock(&rq_lock);
+    schedule_locked(flags);
+}
+
+/*
+ * Ожидание по событию.
+ *
+ * Канал — это просто число, о котором договорились ждущий и будящий; у
+ * нас это номер задачи, конца которой ждут. Ничего больше от канала не
+ * требуется: важно лишь, чтобы обе стороны назвали одно и то же.
+ *
+ * Проверка условия и засыпание идут под замком очереди, а пробуждение
+ * берёт тот же замок — поэтому промежутка, в котором условие уже
+ * выполнено, а задача ещё не спит, попросту нет.
+ */
+static void wait_on_locked(u64 chan)
+{
+    struct cpu *c = this_cpu();
+
+    if (c->current && c->current != c->idle) {
+        c->current->wait_chan = chan;
+        c->current->state = TASK_WAITING;
+    }
+}
+
+/* Разбудить всех, кто ждёт этого канала. Зовётся под замком очереди. */
+static void wake_chan_locked(u64 chan)
+{
+    for (struct task *t = all_head; t; t = t->all_next) {
+        if (t->state != TASK_WAITING || t->wait_chan != chan)
+            continue;
+        t->state = TASK_READY;
+        t->wait_chan = 0;
+        rq_push(t);
+    }
+}
+
+int sched_wait_for(u64 id, u64 *code)
+{
+    for (;;) {
+        u64 flags = irq_save();
+
+        spin_lock(&rq_lock);
+
+        if (find_exit_locked(id, code)) {
+            spin_unlock(&rq_lock);
+            irq_restore(flags);
+            return 1;
+        }
+
+        if (!alive_locked(id)) {
+            spin_unlock(&rq_lock);
+            irq_restore(flags);
+            return 0;               /* такой задачи нет и не было */
+        }
+
+        /* Засыпаем, не отпуская замок: разбудить нас можно только взяв
+         * его, то есть не раньше, чем мы уснём по-настоящему. */
+        wait_on_locked(id);
+        schedule_locked(flags);
+
+        /* Проснулись — и снова проверяем. Пробуждение означает
+         * «посмотри», а не «готово»: разбудить могли и по другому
+         * поводу. */
+    }
 }
 
 void sched_tick(void)
@@ -583,7 +680,9 @@ const char *task_name(void)
 
 void sched_dump(void)
 {
-    static const char *state_name[] = { "ГОТОВА", "БЕЖИТ", "СПИТ", "КОНЕЦ" };
+    static const char *state_name[] = {
+        "ГОТОВА", "БЕЖИТ", "СПИТ", "ЖДЁТ", "КОНЕЦ"
+    };
     u64 flags = spin_lock_irq(&rq_lock);
 
     /* idle-задачи пропускаем: их ровно по одной на ядро, они никогда
