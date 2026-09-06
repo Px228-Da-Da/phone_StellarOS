@@ -27,6 +27,7 @@
 #include "fb.h"
 #include "sched.h"
 #include "print.h"
+#include "timer.h"
 #include "string.h"
 #include "spinlock.h"
 #include "uiarea.h"
@@ -368,7 +369,8 @@ static void claim_layer(struct window *win, int layer)
      * когда та возвращает спрятанное приложение. Строка «ввод занял
      * слой 3» сбивала с толку ровно там, где нужна ясность.
      */
-    kprintf("ОКНО     : ЗАДАЧА %lu ЗАНЯЛА СЛОЙ %d\n", win->owner, layer);
+    kprintf("ОКНО     : %lu МС, ЗАДАЧА %lu ЗАНЯЛА СЛОЙ %d\n",
+            timer_uptime_ms(), win->owner, layer);
 }
 
 static int show_by_layer(struct window *win, u32 x, u32 y)

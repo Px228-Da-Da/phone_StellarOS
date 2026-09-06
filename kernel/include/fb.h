@@ -70,6 +70,9 @@ extern u32 fb_ovl_seen;
  * не должен писать больше никто. Всякую чужую запись называет поимённо. */
 void fb_watch_strips(int on);
 
+/* Отметить свои, законные записи в полосы, чтобы сторож молчал о них */
+void fb_strip_mine(int on);
+
 void fb_panic_text(u32 line, const char *s);
 u32  fb_text_width(u32 scale, const char *s);
 void fb_info(u64 *base, u32 *w, u32 *h, u32 *stride);

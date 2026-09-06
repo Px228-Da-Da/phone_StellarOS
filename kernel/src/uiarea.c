@@ -127,9 +127,11 @@ void ui_status_draw(void)
         u32 bar_x = (sw - bar_w) / 2;
         u32 bar_y = sh - UI_HOME_H / 2 - 3;
 
+        fb_strip_mine(1);
         fb_fill_rect(0, 0, sw, UI_STATUS_H, COL_BAR);
         fb_fill_rect(0, sh - UI_HOME_H, sw, UI_HOME_H, COL_BAR);
         fb_fill_rect(bar_x, bar_y, bar_w, 6, COL_HOME);
+        fb_strip_mine(0);
         bars_painted = 1;
     }
 

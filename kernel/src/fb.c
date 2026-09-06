@@ -17,6 +17,7 @@
 #include "mmu.h"
 #include "print.h"
 #include "sched.h"
+#include "timer.h"
 
 #include "font.h"
 
@@ -565,6 +566,7 @@ void fb_set_colors(u32 fg, u32 bg) { fb.fg = fg; fb.bg = bg; }
  * Поэтому спрашиваем не код, а систему: пусть назовётся сама.
  */
 static int strip_watch;
+static int strip_mine;
 static u32 strip_told;
 
 void fb_watch_strips(int on)
@@ -573,11 +575,22 @@ void fb_watch_strips(int on)
     strip_told = 0;
 }
 
+/*
+ * «Это пишу я, и это законно».
+ *
+ * Полосы кладёт само их хозяйство — фон под часами, и без этой отметки
+ * сторож ловил бы в первую очередь его. А искать надо чужого.
+ */
+void fb_strip_mine(int on)
+{
+    strip_mine = on;
+}
+
 static void strip_check(const char *what, u32 y, u32 h)
 {
     u32 bot;
 
-    if (!strip_watch || !fb.ready)
+    if (!strip_watch || strip_mine || !fb.ready)
         return;
 
     bot = (fb.height > STRIP_HOME) ? fb.height - STRIP_HOME : fb.height;
@@ -590,8 +603,8 @@ static void strip_check(const char *what, u32 y, u32 h)
         return;
     strip_told++;
 
-    kprintf("ПОЛОСЫ   : В НИХ ПИШЕТ %s, СТРОКИ %u..%u, ЗАДАЧА %s\n",
-            what, y, y + h, task_name());
+    kprintf("ПОЛОСЫ   : %lu МС, В НИХ ПИШЕТ %s, СТРОКИ %u..%u, ЗАДАЧА %s\n",
+            timer_uptime_ms(), what, y, y + h, task_name());
 }
 
 void fb_clear(u32 color)
