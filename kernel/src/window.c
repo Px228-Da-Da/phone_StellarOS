@@ -30,6 +30,7 @@
 #include "string.h"
 #include "spinlock.h"
 #include "uiarea.h"
+#include "input.h"
 #include "io.h"
 
 /* Адрес окна в пространстве программы: у всех один и тот же, потому что
@@ -584,6 +585,23 @@ u64 window_owner_at(u32 x, u32 y)
 }
 
 /*
+ * Кто где: имя задачи, слой, положение. Печатается при переключении
+ * окон — именно там ошибки и живут, а по слоям видно, кто наверху.
+ */
+static void window_tell_layers(void)
+{
+    for (u32 i = 0; i < WINDOW_MAX; i++) {
+        struct window *w = &windows[i];
+
+        if (!w->owner)
+            continue;
+        kprintf("ОКНО     :   ЗАДАЧА %lu, СЛОЙ %d, %ux%u В (%u,%u)%s\n",
+                w->owner, w->layer, w->w, w->h, w->x, w->y,
+                (backdrop_task && w->owner == backdrop_task) ? ", ФОН" : "");
+    }
+}
+
+/*
  * Кнопка «домой»: спрятать приложение или вернуть его.
  *
  * Пока приложение занимает всю рабочую область, оболочки под ним не
@@ -619,6 +637,8 @@ void window_home(void)
         hidden_task = hide->owner;
         spin_unlock_irq(&win_lock, flags);
         kprintf("ОКНО     : ПРИЛОЖЕНИЕ СПРЯТАНО, ВИДНА ОБОЛОЧКА\n");
+        window_tell_layers();
+        input_tell_again();
         return;
     }
 
@@ -631,6 +651,8 @@ void window_home(void)
         show_by_layer(back, x, y);
         back->placed = 1;
         kprintf("ОКНО     : ПРИЛОЖЕНИЕ ВЕРНУЛОСЬ\n");
+        window_tell_layers();
+        input_tell_again();
         return;
     }
 

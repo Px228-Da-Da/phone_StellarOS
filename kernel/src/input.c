@@ -207,6 +207,11 @@ static u64 grabbed[MAX_FINGERS + 1];
 /* Сколько нажатий уже разобрано вслух */
 static u32 told_touch;
 
+void input_tell_again(void)
+{
+    told_touch = 0;
+}
+
 static void event_push(u8 id, u8 action, u16 x, u16 y)
 {
     u32 next;
