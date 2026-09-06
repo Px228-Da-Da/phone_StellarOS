@@ -104,6 +104,7 @@ static char line[96];
 
 /* Прокрутка */
 static int scroll;                  /* на сколько уехал список   */
+static int scroll_want;             /* куда просится палец       */
 static int scroll_max;
 static int fling;                   /* скорость по инерции, px/с */
 
@@ -122,6 +123,7 @@ static int frac;                    /* недоехавшие тысячные �
 
 /* Замер кадра: без чисел «плавно» и «дёргано» остаются спором о вкусах */
 static u64 frame_sum;
+static u64 draw_sum;
 static u32 frame_count;
 static u64 frame_told;
 
@@ -441,7 +443,34 @@ static void scroll_to(int v)
         if (v > scroll_max + RUBBER_MAX)
             v = scroll_max + RUBBER_MAX;
     }
-    scroll = v;
+    scroll_want = v;
+}
+
+/*
+ * Подтянуться к пальцу.
+ *
+ * Список идёт не прямо в точку последнего замера, а долей пути к ней за
+ * кадр. Причина не в красоте: панель опрашивается двести раз в секунду,
+ * рисуем мы шестьдесят кадров, и между кадрами набегает то три замера,
+ * то четыре. Шаг выходит неровным при идеально ровных кадрах — и именно
+ * это глаз читает как дрожь. Доля пути эту неровность съедает, а
+ * отставание получается меньше кадра и незаметно.
+ *
+ * Возвращает 1, если картинка изменилась.
+ */
+static int follow_finger(void)
+{
+    int d = scroll_want - scroll;
+
+    if (!d)
+        return 0;
+
+    if (d > -2 && d < 2)
+        scroll = scroll_want;
+    else
+        scroll += d * 2 / 3;
+
+    return 1;
 }
 
 /* Внутри границ или уже за ними */
@@ -483,6 +512,7 @@ static int fling_step(void)
 
     /* Пружина сильнее полёта: за краем список только возвращается */
     if (out_of_bounds()) {
+        scroll_want = scroll;   /* пружина и полёт ведут цель за собой */
         edge = (scroll < 0) ? 0 : scroll_max;
         d = edge - scroll;
         fling = 0;
@@ -512,6 +542,7 @@ static int fling_step(void)
 
         scroll -= move / 1000;
         frac = move % 1000;
+        scroll_want = scroll;
     }
 
     /* Затухание по миллисекундам: сколько прошло, столько раз и гасим */
@@ -614,6 +645,7 @@ static void on_down(const struct touch *t)
     down_x = t->x;
     down_y = t->y;
     down_scroll = scroll;
+    scroll_want = scroll;
     down_ms = uptime_ms();
     vn = 0;
     vsample(t->y, down_ms);
@@ -720,15 +752,24 @@ void _start(void)
     for (;;) {
         struct touch t;
         s64 got;
-        int moving = scroll_busy();
+        int moving = scroll_busy() || scroll != scroll_want;
         int redraw = 0;
 
         /*
-         * Ждём пальца, а когда список летит по инерции — ждём не дольше
-         * кадра. Спать в ожидании события, которого не будет, значило бы
-         * остановить движение сразу после отпускания.
+         * Ждём пальца, а когда список движется — почти не ждём.
+         *
+         * Здесь была потеря половины кадров. Стояло ожидание в целый
+         * кадр: пока список летит, событий нет, цикл честно высыпал
+         * шестнадцать миллисекунд и только потом принимался рисовать —
+         * а рисование с показом стоят ещё шестнадцать. Тридцать две
+         * миллисекунды на кадр, тридцать кадров в секунду вместо
+         * шестидесяти, и именно это выглядело дёрганым.
+         *
+         * Ждать незачем: показ и так привязан к развёртке панели и сам
+         * держит нас ровно на шестидесяти кадрах. Миллисекунда нужна
+         * только чтобы забрать событие, если оно уже пришло.
          */
-        got = moving ? input_wait(&t, FRAME_MS) : input(&t);
+        got = moving ? input_wait(&t, 1) : input(&t);
 
         if (got == 1) {
             if (t.action == TOUCH_DOWN)
@@ -741,6 +782,8 @@ void _start(void)
         }
 
         if (fling_step())
+            redraw = 1;
+        if (follow_finger())
             redraw = 1;
 
         /* Взведённая кнопка гаснет сама: иначе случайное касание через
@@ -757,9 +800,12 @@ void _start(void)
 
         if (redraw) {
             u64 t0 = uptime_ms();
+            u64 t1;
 
             draw_all();
+            t1 = uptime_ms();
             show();
+            draw_sum += t1 - t0;
 
             /*
              * Раз в секунду говорим, во сколько обходится кадр. Спорить
@@ -770,12 +816,21 @@ void _start(void)
             frame_count++;
             if (frame_count >= 30 && uptime_ms() - frame_told > 1000) {
                 frame_told = uptime_ms();
-                ulabel(line, "EL0      : ОБОЛОЧКА: КАДР, МС ",
+                ulabel(line, "EL0      : ОБОЛОЧКА: КАДР ",
                        frame_sum / frame_count);
+                {
+                    const char *mid = ", ИЗ НИХ РИСОВАНИЕ ";
+                    u32 n = ustrlen(line);
+
+                    for (u32 k = 0; mid[k]; k++)
+                        line[n++] = mid[k];
+                    unum(line + n, draw_sum / frame_count);
+                }
                 line[ustrlen(line)] = 10;
                 line[ustrlen(line) + 1] = 0;
                 write(line);
                 frame_sum = 0;
+                draw_sum = 0;
                 frame_count = 0;
             }
         }
