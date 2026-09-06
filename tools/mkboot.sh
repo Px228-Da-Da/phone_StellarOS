@@ -16,7 +16,7 @@ set -e
 
 ORIG_BOOT="${1:-prebuilt/backup/boot.img}"
 KERNEL="${2:-kernel/build/merlin/Image}"
-OUT="${3:-out/velo-boot.img}"
+OUT="${3:-out/stellar-boot.img}"
 WORK=unpacked
 
 # Пакета mkbootimg на PyPI нет — инструмент берётся из AOSP,

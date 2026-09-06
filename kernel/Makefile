@@ -1,4 +1,4 @@
-# Сборка ядра VELO-OS.
+# Сборка ядра StellarOS.
 #   make BOARD=qemu     — образ для эмулятора (быстрая итерация)
 #   make BOARD=merlin   — образ для Redmi Note 9
 #   make run            — запустить в QEMU
@@ -151,7 +151,7 @@ run-screen:
 # Снимок экрана в PNG — работает где угодно, окно не нужно
 screenshot:
 	@$(MAKE) --no-print-directory BOARD=qemu build/qemu/Image
-	@cd .. && python3 tools/screenshot.py 3.5 kernel/build/velo-screen.png
+	@cd .. && python3 tools/screenshot.py 3.5 kernel/build/stellar-screen.png
 
 # Конфигурация, максимально близкая к Redmi Note 9:
 #   cortex-a55 — малые ядра Helio G85; большие A75 QEMU не эмулирует,

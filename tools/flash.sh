@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Прошивка нашего образа в раздел boot + быстрый откат.
 #
-#   tools/flash.sh out/velo-boot.img   — прошить наше ядро
+#   tools/flash.sh out/stellar-boot.img   — прошить наше ядро
 #   tools/flash.sh --restore           — вернуть заводской Android
 set -e
 
@@ -15,7 +15,7 @@ if [ "$1" = "--restore" ]; then
     exit 0
 fi
 
-IMG="${1:-out/velo-boot.img}"
+IMG="${1:-out/stellar-boot.img}"
 [ -f "$IMG" ] || { echo "Нет образа: $IMG" >&2; exit 1; }
 
 if [ ! -f "$BACKUP" ]; then

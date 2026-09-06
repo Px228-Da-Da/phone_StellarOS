@@ -43,7 +43,7 @@
 #define RAM_SIZE    QEMU_RAM_SIZE
 #endif
 
-#define OS_NAME     "VELO-OS"
+#define OS_NAME     "StellarOS"
 #define OS_VERSION  "0.4"
 
 /* Частота системного тика. 100 Гц — компромисс: достаточно часто, чтобы
@@ -1285,7 +1285,15 @@ void kmain(u64 dtb_phys)
                     last = 1;
                     kprintf("USB: ПЕРЕЧИСЛЕНЫ! ЗАПРОСОВ %u\n",
                             usb_setup_count);
-                    usb_send((const u8 *)"VELO-OS: USB console alive\n", 28);
+                    {
+                        /* Длину берём у самой строки: при переименовании
+                         * системы вручную посчитанное число разошлось бы
+                         * с текстом молча. */
+                        static const char hi[] =
+                            "StellarOS: USB console alive\n";
+
+                        usb_send((const u8 *)hi, sizeof(hi) - 1);
+                    }
                 }
             }
             kprintf("USB: ИТОГ — ЗАПРОСОВ %u, %s\n", usb_setup_count,

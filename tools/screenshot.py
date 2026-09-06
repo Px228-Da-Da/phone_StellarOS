@@ -20,11 +20,11 @@ import sys
 import time
 
 KERNEL = "kernel/build/qemu/Image"
-SOCK = "/tmp/velo-qmp.sock"
-PPM = "/tmp/velo-shot.ppm"
+SOCK = "/tmp/stellar-qmp.sock"
+PPM = "/tmp/stellar-shot.ppm"
 
 delay = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0
-out_png = sys.argv[2] if len(sys.argv) > 2 else "/tmp/velo-shot.png"
+out_png = sys.argv[2] if len(sys.argv) > 2 else "/tmp/stellar-shot.png"
 
 if not os.path.exists(KERNEL):
     sys.exit(f"нет ядра {KERNEL} — сначала make BOARD=qemu")
@@ -41,7 +41,7 @@ qemu = subprocess.Popen([
     "-m", "1G",
     "-device", "ramfb",            # тот самый экран
     "-display", "none",            # окна нет, кадр забираем через QMP
-    "-serial", "file:/tmp/velo-serial.log",
+    "-serial", "file:/tmp/stellar-serial.log",
     "-qmp", f"unix:{SOCK},server,nowait",
     "-kernel", KERNEL,
 ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

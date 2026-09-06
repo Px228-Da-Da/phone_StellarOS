@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 rem ============================================================
-rem  Сборка и прошивка VELO-OS одной командой.
+rem  Сборка и прошивка StellarOS одной командой.
 rem
 rem    flash.bat          обычное ядро
 rem    flash.bat 17       ядро с остановкой на этапе 17 (см. HALT_STAGE)
@@ -42,7 +42,7 @@ if errorlevel 1 (
     echo       УПАКОВКА ОБРАЗА НЕ ПРОШЛА
     goto :fail
 )
-for /f %%s in ('%WSL% bash -c "stat -c%%s %ROOT%/out/velo-boot.img"') do echo       образ готов, %%s байт
+for /f %%s in ('%WSL% bash -c "stat -c%%s %ROOT%/out/stellar-boot.img"') do echo       образ готов, %%s байт
 
 :flashimg
 rem --- 2. Держим WSL живым: без запущенного дистрибутива usbipd не пробросит
@@ -84,7 +84,7 @@ ping -n 3 127.0.0.1 >nul
 
 rem --- 4. Прошивка ----------------------------------------------
 echo [4/4] Прошиваю...
-%WSL% bash -c "cd %ROOT% && echo y | bash tools/flash.sh out/velo-boot.img 2>&1 | grep -E 'Sending|Writing|Rebooting|СТОП|НЕТ'"
+%WSL% bash -c "cd %ROOT% && echo y | bash tools/flash.sh out/stellar-boot.img 2>&1 | grep -E 'Sending|Writing|Rebooting|СТОП|НЕТ'"
 echo.
 echo Готово. Смотри на экран телефона.
 goto :end

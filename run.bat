@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 rem ============================================================
-rem  VELO-OS - build and run in QEMU.
+rem  StellarOS - build and run in QEMU.
 rem
 rem  Usage:
 rem     run.bat            build + run with screen window
@@ -66,9 +66,9 @@ if not exist "%IMG%" (
 rem --- Screenshot mode: no window needed, the WSL script does everything
 if /i "%MODE%"=="shot" (
     echo === screenshot ===
-    wsl -u root bash -lc "cd '%WPROJ%' && python3 tools/screenshot.py 3.5 kernel/build/velo-screen.png"
-    if exist "%PROJ%\kernel\build\velo-screen.png" (
-        start "" "%PROJ%\kernel\build\velo-screen.png"
+    wsl -u root bash -lc "cd '%WPROJ%' && python3 tools/screenshot.py 3.5 kernel/build/stellar-screen.png"
+    if exist "%PROJ%\kernel\build\stellar-screen.png" (
+        start "" "%PROJ%\kernel\build\stellar-screen.png"
     )
     goto :end
 )

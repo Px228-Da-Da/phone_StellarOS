@@ -1,7 +1,7 @@
 ﻿# ВНИМАНИЕ: файл обязан быть в UTF-8 С МЕТКОЙ (BOM).
 # PowerShell 5.1 читает скрипты как Windows-1251, если метки нет, и русские
 # комментарии превращаются в мусор, ломая разбор кавычек.
-# Терминал VELO-OS поверх USB.
+# Терминал StellarOS поверх USB.
 #
 # Телефон представляется последовательным портом класса CDC-ACM, поэтому
 # драйвер в Windows встроенный и ставить ничего не нужно. Порт находим не
@@ -13,7 +13,7 @@
 
 $VID = 'VID_0BC4'
 
-Write-Host "Ищу VELO-OS на USB..." -ForegroundColor DarkGray
+Write-Host "Ищу StellarOS на USB..." -ForegroundColor DarkGray
 
 while ($true) {
     $dev = Get-PnpDevice -PresentOnly -Class Ports -ErrorAction SilentlyContinue |

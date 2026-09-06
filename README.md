@@ -1,4 +1,4 @@
-# VELO-OS — своя ОС на своём ядре для Redmi Note 9 (merlin)
+# StellarOS — своя ОС на своём ядре для Redmi Note 9 (merlin)
 
 Bare-metal ядро AArch64, которое грузится вместо Linux на MediaTek Helio G85.
 
@@ -9,7 +9,7 @@ Bare-metal ядро AArch64, которое грузится вместо Linux 
 
 ```
 ================================
-  VELO-OS v0.4
+  StellarOS v0.4
   AARCH64 BARE METAL KERNEL
 ================================
 

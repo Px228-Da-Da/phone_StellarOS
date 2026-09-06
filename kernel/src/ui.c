@@ -196,7 +196,7 @@ static void draw_tile(int i)
 
 static void draw_header(void)
 {
-    const char *title = "VELO-OS";
+    const char *title = "StellarOS";
     const char *sub   = "СВОЯ ОС НА ГОЛОМ ЖЕЛЕЗЕ";
 
     fb_text(MARGIN, 150, 9, UI_TEXT, UI_TRANSPARENT, title);

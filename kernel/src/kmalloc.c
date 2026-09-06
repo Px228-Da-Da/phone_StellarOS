@@ -24,7 +24,7 @@
  * же момент читает другое ядро. */
 static struct spinlock heap_lock = SPINLOCK_INIT("heap");
 
-#define HEAP_MAGIC      0x4F4C4556U         /* "VELO" — метка целостности */
+#define HEAP_MAGIC      0x4F4C4556U         /* "STELLAR" — метка целостности */
 #define HEAP_ALIGN      16UL                /* требование AArch64 ABI     */
 #define HEAP_MIN_SPLIT  32UL                /* мельче дробить нет смысла  */
 
