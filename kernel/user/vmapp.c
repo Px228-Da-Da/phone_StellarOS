@@ -31,35 +31,43 @@ static char line[256];
 
 /* --- Что машина просит у мира -------------------------------------- */
 
+/*
+ * Строку собираем целиком и отдаём ядру одним вызовом.
+ *
+ * Не мелочь: печатают одновременно восемь ядер и десяток задач, а вывод
+ * кладётся в общее кольцо по вызову. Три вызова на строку — три места,
+ * где между ними встрянет чужая строка, и в логе получается каша из
+ * половинок. Так это и выглядело с первого запуска на телефоне.
+ */
+static void say(const char *a, const char *b)
+{
+    u32 i = 0, j;
+
+    for (j = 0; a[j] && i < sizeof(line) - 2; j++)
+        line[i++] = a[j];
+    for (j = 0; b && b[j] && i < sizeof(line) - 2; j++)
+        line[i++] = b[j];
+    if (i == 0 || line[i - 1] != 10)
+        line[i++] = 10;
+    line[i] = 0;
+    write(line);
+}
+
 static void host_print(const char *s)
 {
-    u32 i = 0;
-
-    while (i < sizeof(line) - 16 && s[i]) {
-        line[i] = s[i];
-        i++;
-    }
-    line[i] = 0;
-    write("EL0      : ");
-    write(line);
+    say("EL0      : ", s);
 }
 
 static void host_printn(vm_i64 v)
 {
+    char buf[32];
     u64 mag = (v < 0) ? (u64)(-v) : (u64)v;
     u32 i = 0;
 
-    line[i++] = 'H';
-    line[i++] = 'T';
-    line[i++] = ':';
-    line[i++] = ' ';
     if (v < 0)
-        line[i++] = '-';
-    i += unum(line + i, mag);
-    line[i++] = '\n';
-    line[i] = 0;
-    write("EL0      : ");
-    write(line);
+        buf[i++] = '-';
+    unum(buf + i, mag);
+    say("EL0      : HT: ", buf);
 }
 
 /*
@@ -219,9 +227,7 @@ void _start(void)
         exit(20);
     }
 
-    write("EL0      : HITTIS: ЗАПУСКАЮ ");
-    write(name);
-    write("\n");
+    say("EL0      : HITTIS: ЗАПУСКАЮ ", name);
 
     rc = vm_run(app_slt, app_slt_len, &host);
 
