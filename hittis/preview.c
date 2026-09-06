@@ -1,30 +1,35 @@
 /*
- * preview — запустить приложение Hittis на компьютере, в настоящем окне.
+ * preview — показать приложение Hittis на компьютере, до телефона.
  *
- * Замысел простой: писать приложение и видеть его сразу, не трогая
- * телефон. Окно того же размера, что попросит приложение, тот же шрифт,
- * мышь вместо пальца. Правка исходника перезапускает приложение сама —
- * сохранил файл, и через мгновение оно уже другое.
+ * Замысел простой: писать приложение и видеть его сразу. Показываем в
+ * браузере: открываешь localhost и видишь приложение того размера, что
+ * оно попросило, тем же шрифтом, что на телефоне. Мышь работает пальцем,
+ * а правка исходника перезапускает приложение сама.
  *
- * Это работает не потому, что мы старательно повторили поведение
- * телефона, а потому, что повторять нечего: виртуальная машина здесь та
- * же самая, файл hittis/vm.c берётся как есть. Разница ровно в таблице
+ * Почему браузер, а не окно. Первым был X11: библиотека нашлась, окно
+ * создавалось, X-сервер честно докладывал «показано» — а на экране у
+ * человека не появлялось ничего, потому что WSLg окна до рабочего стола
+ * не доносил. Спорить с этим бессмысленно. Браузер есть на всякой
+ * машине, работает из WSL без графики вовсе и заодно по сети — можно
+ * смотреть с телефона на приложение, собранное на компьютере.
+ *
+ * Это честная проверка, а не похожая: виртуальная машина здесь ТА ЖЕ
+ * САМАЯ, файл hittis/vm.c берётся как есть. Разница ровно в таблице
  * vm_host — что делать, когда приложение просит нарисовать или подождать
- * палец. Там системные вызовы, здесь X11.
- *
- * Отсюда правило, которым стоит пользоваться: если приложение ведёт себя
- * здесь и на телефоне по-разному, то расходятся не «две реализации», а
- * ровно эти две таблицы, и смотреть надо в них.
+ * палец: на телефоне системные вызовы, здесь картинка и щелчки мышью.
+ * Значит если приложение ведёт себя тут и там по-разному, расходятся не
+ * две реализации, а эти две таблицы, и смотреть надо в них.
  */
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
-#include <libgen.h>
 
 #include "vm.h"
 #include "slt.h"
@@ -108,28 +113,45 @@ static const struct face *face_for(u32 px)
     return best;
 }
 
-/* --- Окно и кадр ---------------------------------------------------- */
+/* --- Кадр ----------------------------------------------------------- */
 
-static Display *dpy;
-static Window   win;
-static GC       gc;
-static XImage  *img;
-static u32     *pix;            /* кадр в 0xAARRGGBB, как на телефоне */
-static int      win_w, win_h;
-static Atom     wm_delete;
+static u32 *pix;                /* 0xAARRGGBB, как на телефоне */
+static int  win_w, win_h;
+static u32  frame_no;           /* сколько раз приложение показало кадр */
 
-/* Что происходит с мышью — она же палец */
-static int mouse_down;
-static int last_mx, last_my;
+/* --- Касания, пришедшие из браузера --------------------------------- */
 
-/* Куда сохранить первый кадр и выйти. Нужно, когда экрана нет вовсе —
- * по ssh или в сборочной машине: посмотреть глазами всё равно надо. */
-static const char *shot_path;
+#define TOUCH_RING 64
 
-/* Исходник, за которым следим */
+static vm_i64 ring[TOUCH_RING];
+static int    ring_head, ring_tail;
+
+static void touch_put(vm_i64 t)
+{
+    int next = (ring_head + 1) % TOUCH_RING;
+
+    if (next == ring_tail)
+        return;                 /* переполнение: теряем новое, не старое */
+    ring[ring_head] = t;
+    ring_head = next;
+}
+
+static int touch_get(vm_i64 *t)
+{
+    if (ring_tail == ring_head)
+        return 0;
+    *t = ring[ring_tail];
+    ring_tail = (ring_tail + 1) % TOUCH_RING;
+    return 1;
+}
+
+/* --- Исходник, за которым следим ------------------------------------ */
+
 static const char *src_path;
 static time_t      src_mtime;
 static const char *self_path;
+static const char *shot_path;
+static int         port = 8080;
 
 static time_t mtime_of(const char *path)
 {
@@ -144,147 +166,230 @@ static void die(const char *why)
     exit(1);
 }
 
-/* Перезапуститься целиком: и компилятор, и машина начнут с чистого листа */
 static void restart(void)
 {
     printf("\n=== исходник изменился, перезапускаю ===\n\n");
     fflush(stdout);
-    if (dpy)
-        XCloseDisplay(dpy);
     execl(self_path, self_path, src_path, (char *)NULL);
     die("перезапуститься не вышло");
 }
 
-static void window_open(int w, int h, const char *name)
+/* --- Картинка кадра: BMP -------------------------------------------- */
+
+/*
+ * BMP, а не PNG.
+ *
+ * PNG требует сжатия, то есть zlib, которого в системе нет: менять одну
+ * зависимость на другую ради просмотра не стоит. BMP показывают все
+ * браузеры, а кадр уходит по localhost, где два мегабайта ничего не
+ * стоят. И отдаём мы его только когда приложение нарисовало новый:
+ * браузер сначала спрашивает номер кадра, а это несколько байт.
+ */
+static u8 *bmp_make(u32 *out_len)
 {
-    XSizeHints hints;
-    char title[128];
+    int row = win_w * 3;
+    int pad = (4 - (row % 4)) % 4;
+    u32 data = (u32)(row + pad) * (u32)win_h;
+    u32 len = 54 + data;
+    u8 *b = calloc(len, 1);
+    u32 o;
 
-    dpy = XOpenDisplay(NULL);
-    if (!dpy)
-        die("нет дисплея (в WSL нужен WSLg или свой X-сервер)");
+    b[0] = 'B'; b[1] = 'M';
+    b[2] = (u8)len; b[3] = (u8)(len >> 8);
+    b[4] = (u8)(len >> 16); b[5] = (u8)(len >> 24);
+    b[10] = 54;
+    b[14] = 40;
+    b[18] = (u8)win_w; b[19] = (u8)(win_w >> 8);
+    b[20] = (u8)(win_w >> 16); b[21] = (u8)(win_w >> 24);
+    b[22] = (u8)win_h; b[23] = (u8)(win_h >> 8);
+    b[24] = (u8)(win_h >> 16); b[25] = (u8)(win_h >> 24);
+    b[26] = 1;
+    b[28] = 24;
+    b[34] = (u8)data; b[35] = (u8)(data >> 8);
+    b[36] = (u8)(data >> 16); b[37] = (u8)(data >> 24);
 
-    win_w = w;
-    win_h = h;
-    pix = calloc((size_t)w * h, 4);
+    o = 54;
+    for (int y = win_h - 1; y >= 0; y--) {       /* BMP идёт снизу вверх */
+        for (int x = 0; x < win_w; x++) {
+            u32 c = pix[y * win_w + x];
 
-    win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0,
-                              (unsigned)w, (unsigned)h, 0, 0, 0x00101828);
-    XSelectInput(dpy, win, ExposureMask | ButtonPressMask | ButtonReleaseMask |
-                           PointerMotionMask | KeyPressMask | StructureNotifyMask);
+            b[o++] = (u8)c;                      /* синий   */
+            b[o++] = (u8)(c >> 8);               /* зелёный */
+            b[o++] = (u8)(c >> 16);              /* красный */
+        }
+        o += (u32)pad;
+    }
 
-    /* Размер окна постоянный: приложение просило именно такой, и тянуть
-     * его мышью значило бы показывать не то, что будет на телефоне. */
-    hints.flags = PMinSize | PMaxSize;
-    hints.min_width = hints.max_width = w;
-    hints.min_height = hints.max_height = h;
-    XSetWMNormalHints(dpy, win, &hints);
-
-    snprintf(title, sizeof(title), "Hittis: %s", name);
-    XStoreName(dpy, win, title);
-
-    wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-    XSetWMProtocols(dpy, win, &wm_delete, 1);
-
-    XMapWindow(dpy, win);
-    gc = XCreateGC(dpy, win, 0, NULL);
-
-    img = XCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), 24,
-                       ZPixmap, 0, (char *)pix, (unsigned)w, (unsigned)h, 32, 0);
-    if (!img)
-        die("не вышло завести кадр");
+    *out_len = len;
+    return b;
 }
 
-static void window_show(void)
+/* --- Страница ------------------------------------------------------- */
+
+static const char page[] =
+"<!doctype html><meta charset=utf-8><title>Hittis</title>"
+"<style>"
+"body{background:#0b0f1a;color:#8fa3c8;font:14px system-ui;margin:0;"
+"display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}"
+"img{image-rendering:pixelated;border-radius:8px;box-shadow:0 8px 40px #0008;"
+"cursor:crosshair;user-select:none}"
+"b{color:#cfe0ff}"
+"</style>"
+"<div><b id=n>приложение</b> — мышь работает пальцем, "
+"правка исходника перезапускает</div>"
+"<img id=e draggable=false>"
+"<script>"
+"let v=-1,down=false;"
+"const e=document.getElementById('e');"
+"function pos(ev){const r=e.getBoundingClientRect();"
+"return[Math.round(ev.clientX-r.left),Math.round(ev.clientY-r.top)];}"
+"function send(a,ev){const p=pos(ev);"
+"fetch('/t?a='+a+'&x='+p[0]+'&y='+p[1]);}"
+"e.addEventListener('mousedown',ev=>{down=true;send(0,ev);ev.preventDefault();});"
+"e.addEventListener('mousemove',ev=>{if(down)send(1,ev);});"
+"window.addEventListener('mouseup',ev=>{if(down){down=false;send(2,ev);}});"
+"async function tick(){try{"
+"const r=await fetch('/v');const t=await r.text();const n=+t.split(' ')[0];"
+"if(n!==v){v=n;e.src='/f?'+n;"
+"document.getElementById('n').textContent=t.split(' ').slice(1).join(' ');}"
+"}catch(err){}setTimeout(tick,60);}"
+"tick();"
+"</script>";
+
+/* --- Сервер --------------------------------------------------------- */
+
+static int  listen_fd = -1;
+static char app_name[64] = "приложение";
+
+static void http_start(void)
 {
-    if (!dpy)
+    struct sockaddr_in a;
+    int on = 1;
+
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0)
+        die("нет сокета");
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    /* Порт может быть занят прошлым просмотром — берём следующий */
+    for (int i = 0; i < 20; i++) {
+        a.sin_port = htons((unsigned short)(port + i));
+        if (bind(listen_fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+            port += i;
+            listen(listen_fd, 8);
+            printf("смотреть здесь:  http://localhost:%d\n", port);
+            return;
+        }
+    }
+    die("не занять порт");
+}
+
+static void send_all(int fd, const void *buf, size_t n)
+{
+    const char *p = buf;
+
+    while (n) {
+        ssize_t k = write(fd, p, n);
+
+        if (k <= 0)
+            return;
+        p += k;
+        n -= (size_t)k;
+    }
+}
+
+static void reply(int fd, const char *type, const void *body, size_t len)
+{
+    char head[256];
+    int n = snprintf(head, sizeof(head),
+                     "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n"
+                     "Content-Length: %zu\r\nCache-Control: no-store\r\n"
+                     "Connection: close\r\n\r\n", type, len);
+
+    send_all(fd, head, (size_t)n);
+    send_all(fd, body, len);
+}
+
+static int arg_int(const char *req, const char *key)
+{
+    const char *p = strstr(req, key);
+
+    return p ? atoi(p + strlen(key)) : 0;
+}
+
+static void serve_one(int fd)
+{
+    char req[1024];
+    ssize_t n = read(fd, req, sizeof(req) - 1);
+
+    if (n <= 0) {
+        close(fd);
         return;
-    XPutImage(dpy, win, gc, img, 0, 0, 0, 0, (unsigned)win_w, (unsigned)win_h);
-    XFlush(dpy);
+    }
+    req[n] = 0;
+
+    if (strncmp(req, "GET /v", 6) == 0) {
+        char buf[128];
+        int k = snprintf(buf, sizeof(buf), "%u %s", frame_no, app_name);
+
+        reply(fd, "text/plain; charset=utf-8", buf, (size_t)k);
+    } else if (strncmp(req, "GET /f", 6) == 0) {
+        if (!pix) {
+            reply(fd, "text/plain; charset=utf-8", "нет кадра", 17);
+        } else {
+            u32 len = 0;
+            u8 *bmp = bmp_make(&len);
+
+            reply(fd, "image/bmp", bmp, len);
+            free(bmp);
+        }
+    } else if (strncmp(req, "GET /t", 6) == 0) {
+        int a = arg_int(req, "a=");
+        int x = arg_int(req, "x=");
+        int y = arg_int(req, "y=");
+
+        if (x < 0)
+            x = 0;
+        if (y < 0)
+            y = 0;
+        touch_put(((vm_i64)a << 48) | ((vm_i64)x << 32) | (vm_i64)y);
+        reply(fd, "text/plain", "ok", 2);
+    } else {
+        reply(fd, "text/html; charset=utf-8", page, sizeof(page) - 1);
+    }
+
+    close(fd);
 }
 
 /*
- * Разобрать накопившиеся события окна.
+ * Обслужить запросы. wait_ms — сколько ждать, если ничего не пришло.
  *
- * Возвращает упакованное касание (как на телефоне) или -1, если касаний
- * не было. Заодно следит за исходником: правка файла перезапускает всё.
+ * Заодно следим за исходником: правка перезапускает всё целиком.
  */
-static vm_i64 pump(int block)
+static void http_pump(int wait_ms)
 {
-    for (;;) {
-        while (XPending(dpy)) {
-            XEvent e;
-            int action = -1;
+    fd_set r;
+    struct timeval tv;
+    int fd;
 
-            XNextEvent(dpy, &e);
-            switch (e.type) {
-            case Expose:
-                window_show();
-                break;
-            case ButtonPress:
-                if (e.xbutton.button != Button1)
-                    break;
-                mouse_down = 1;
-                last_mx = e.xbutton.x;
-                last_my = e.xbutton.y;
-                action = 0;
-                break;
-            case ButtonRelease:
-                if (e.xbutton.button != Button1)
-                    break;
-                mouse_down = 0;
-                last_mx = e.xbutton.x;
-                last_my = e.xbutton.y;
-                action = 2;
-                break;
-            case MotionNotify:
-                if (!mouse_down)
-                    break;
-                last_mx = e.xmotion.x;
-                last_my = e.xmotion.y;
-                action = 1;
-                break;
-            case KeyPress: {
-                KeySym k = XLookupKeysym(&e.xkey, 0);
+    if (src_mtime && mtime_of(src_path) != src_mtime)
+        restart();
 
-                if (k == 'q' || k == XK_Escape) {
-                    printf("=== закрыто ===\n");
-                    exit(0);
-                }
-                if (k == 'r')
-                    restart();
-                break;
-            }
-            case ClientMessage:
-                if ((Atom)e.xclient.data.l[0] == wm_delete) {
-                    printf("=== окно закрыли ===\n");
-                    exit(0);
-                }
-                break;
-            }
+    FD_ZERO(&r);
+    FD_SET(listen_fd, &r);
+    tv.tv_sec = wait_ms / 1000;
+    tv.tv_usec = (wait_ms % 1000) * 1000;
 
-            if (action >= 0) {
-                int x = last_mx < 0 ? 0 : last_mx;
-                int y = last_my < 0 ? 0 : last_my;
+    if (select(listen_fd + 1, &r, NULL, NULL, &tv) <= 0)
+        return;
 
-                return ((vm_i64)action << 48) | ((vm_i64)x << 32) | (vm_i64)y;
-            }
-        }
-
-        /* Правка исходника — повод начать всё заново */
-        if (src_mtime && mtime_of(src_path) != src_mtime)
-            restart();
-
-        if (!block)
-            return -1;
-
-        /* Спим коротко: и события не задерживаем, и ядро не жжём */
-        {
-            struct timespec ts = { 0, 8 * 1000 * 1000 };
-
-            nanosleep(&ts, NULL);
-        }
-    }
+    fd = accept(listen_fd, NULL, NULL);
+    if (fd >= 0)
+        serve_one(fd);
 }
 
 /* --- Что машина просит у мира --------------------------------------- */
@@ -294,9 +399,12 @@ static void h_printn(vm_i64 v)      { printf("%lld\n", v); fflush(stdout); }
 
 static int h_window(int w, int h)
 {
-    if (dpy)
+    if (pix)
         return 1;               /* окно уже есть, второго не бывает */
-    window_open(w, h, "приложение");
+
+    win_w = w;
+    win_h = h;
+    pix = calloc((size_t)w * h, 4);
     return 1;
 }
 
@@ -306,10 +414,14 @@ static void h_rect(int x, int y, int w, int h, vm_u32 color)
 
     if (!pix)
         return;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x1 > win_w) x1 = win_w;
-    if (y1 > win_h) y1 = win_h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    if (x1 > win_w)
+        x1 = win_w;
+    if (y1 > win_h)
+        y1 = win_h;
 
     for (int py = y; py < y1; py++)
         for (int px = x; px < x1; px++)
@@ -366,7 +478,8 @@ static u32 utf8_next(const char **s)
         *s = (const char *)p;
         return cp;
     }
-    if (b >= 0xE0 && b <= 0xEF && (p[0] & 0xC0) == 0x80 && (p[1] & 0xC0) == 0x80) {
+    if (b >= 0xE0 && b <= 0xEF && (p[0] & 0xC0) == 0x80 &&
+        (p[1] & 0xC0) == 0x80) {
         u32 cp = ((b & 0x0F) << 12) | ((u32)(p[0] & 0x3F) << 6) | (p[1] & 0x3F);
 
         p += 2;
@@ -433,6 +546,7 @@ static void h_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
     draw_text(x, y, scale, color, buf);
 }
 
+/* Снять кадр в файл: нужно там, где браузера нет вовсе */
 static void save_shot(void)
 {
     FILE *f = fopen(shot_path, "wb");
@@ -444,9 +558,7 @@ static void save_shot(void)
     fprintf(f, "P6\n%d %d\n255\n", win_w, win_h);
     for (int i = 0; i < win_w * win_h; i++) {
         u32 c = pix[i];
-        unsigned char rgb[3] = { (unsigned char)(c >> 16),
-                                 (unsigned char)(c >> 8),
-                                 (unsigned char)c };
+        u8 rgb[3] = { (u8)(c >> 16), (u8)(c >> 8), (u8)c };
 
         fwrite(rgb, 1, 3, f);
     }
@@ -457,36 +569,29 @@ static void save_shot(void)
 
 static void h_show(void)
 {
-    window_show();
+    frame_no++;
     if (shot_path)
         save_shot();
-    pump(0);                    /* не копим события, пока рисуем */
+    http_pump(0);               /* отдать кадр тем, кто уже ждёт */
 }
 
 static vm_i64 h_touch(void)
 {
-    if (!dpy)
-        return -1;              /* окна нет — касаться нечего */
-    return pump(1);
+    vm_i64 t;
+
+    for (;;) {
+        if (touch_get(&t))
+            return t;
+        http_pump(20);
+    }
 }
 
 static void h_sleep(vm_i64 ms)
 {
-    struct timespec ts;
-
-    if (ms <= 0)
-        return;
-
-    /* Спим короткими кусками, разбирая события: иначе окно на время сна
-     * перестаёт отвечать, и всякая длинная пауза выглядит зависанием. */
     while (ms > 0) {
-        vm_i64 step = ms > 10 ? 10 : ms;
+        vm_i64 step = ms > 20 ? 20 : ms;
 
-        ts.tv_sec = 0;
-        ts.tv_nsec = step * 1000 * 1000;
-        nanosleep(&ts, NULL);
-        if (dpy)
-            pump(0);
+        http_pump((int)step);
         ms -= step;
     }
 }
@@ -509,14 +614,12 @@ static const struct vm_host host = {
 
 /* --- Запуск --------------------------------------------------------- */
 
-/* Шрифт ищем там, где его оставляет сборка ядра */
 static const char *font_paths[] = {
     "hittis/manrope.stf",       /* делается вместе с просмотром */
     "manrope.stf",
     "kernel/build/merlin/font/manrope.stf",
     "kernel/build/qemu/font/manrope.stf",
     "../kernel/build/merlin/font/manrope.stf",
-    "../kernel/build/qemu/font/manrope.stf",
     NULL
 };
 
@@ -554,9 +657,9 @@ int main(int argc, char **argv)
 
     if (argc < 2) {
         fprintf(stderr,
-                "как пользоваться: preview приложение.ht\n"
-                "  мышь — палец, q — выход, r — перезапуск,\n"
-                "  правка файла перезапускает сама\n");
+                "как пользоваться: preview приложение.ht [порт]\n"
+                "  показывает приложение в браузере на localhost\n"
+                "  preview приложение.ht --кадр вид.ppm — снять первый кадр\n");
         return 1;
     }
 
@@ -564,6 +667,8 @@ int main(int argc, char **argv)
     path = argv[1];
     if (argc >= 4 && strcmp(argv[2], "--кадр") == 0)
         shot_path = argv[3];
+    else if (argc >= 3 && atoi(argv[2]))
+        port = atoi(argv[2]);
 
     /* Рядом с собой лежит компилятор — им и собираем */
     snprintf(dir, sizeof(dir), "%s", argv[0]);
@@ -583,9 +688,9 @@ int main(int argc, char **argv)
         snprintf(cmd, sizeof(cmd), "%s/hittis %s %s", dir, path, slt);
         if (system(cmd) != 0) {
             /*
-             * Не выходим: приложение можно дописывать прямо во время
-             * просмотра, и половина правок компилятору не нравится.
-             * Ждём следующей правки, а не заставляем запускать заново.
+             * Не выходим: приложение дописывают прямо во время просмотра,
+             * и половина правок компилятору не нравится. Ждём следующей
+             * правки, а не заставляем запускать всё заново.
              */
             fprintf(stderr, "\n=== жду исправления исходника ===\n");
             for (;;) {
@@ -613,23 +718,46 @@ int main(int argc, char **argv)
     }
 
     name = vm_app_name(image, len);
-    printf("=== %s ===\n", name ? name : "не наше приложение");
-    printf("мышь — палец, q — выход, r — перезапуск; правка %s перезапускает сама\n\n",
-           src_path ? src_path : "файла");
-    fflush(stdout);
+    if (name)
+        snprintf(app_name, sizeof(app_name), "%s", name);
+
+    printf("=== %s ===\n", app_name);
+    if (!shot_path) {
+        char open_cmd[128];
+
+        http_start();
+
+        /*
+         * Открываем браузер сами. Из WSL это делается через cmd.exe:
+         * страница должна показаться в Windows, а не внутри Linux, где
+         * её всё равно некому показать. Не вышло — ничего страшного,
+         * адрес напечатан выше.
+         */
+        snprintf(open_cmd, sizeof(open_cmd),
+                 "cmd.exe /c start http://localhost:%d >/dev/null 2>&1 || "
+                 "xdg-open http://localhost:%d >/dev/null 2>&1", port, port);
+        if (system(open_cmd) != 0)
+            printf("(браузер не открылся сам — открой адрес выше руками)\n");
+
+        printf("мышь работает пальцем; правка %s перезапускает сама\n\n",
+               src_path ? src_path : "исходника");
+        fflush(stdout);
+    }
 
     rc = vm_run(image, len, &host);
 
     printf(rc == 0 ? "\n=== приложение завершилось ===\n"
                    : "\n=== приложение остановлено машиной ===\n");
 
-    /* Окно не закрываем сразу: иначе последний кадр не разглядеть.
-     * Ждём закрытия или правки исходника. */
-    if (dpy) {
-        printf("окно осталось открытым: q — закрыть\n");
+    /*
+     * Не выходим сразу: последний кадр надо успеть разглядеть, а правка
+     * исходника всё равно перезапустит нас заново.
+     */
+    if (!shot_path) {
+        printf("страница осталась открытой; Ctrl+C — выход\n");
         fflush(stdout);
         for (;;)
-            pump(1);
+            http_pump(100);
     }
 
     return rc == 0 ? 0 : 1;
