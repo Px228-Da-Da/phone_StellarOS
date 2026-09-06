@@ -102,6 +102,22 @@ void ui_status_draw(void)
     if (bat.valid) {
         n += num(line + n, bat.percent);
         line[n++] = '%';
+
+        /*
+         * Рядом с процентом — ток. Он честнее всего показывает, что
+         * происходит: минус значит разряжается, плюс — заряжается, и
+         * никакого «кабель воткнут, а телефон садится».
+         */
+        if (battery_current_valid() && bat.current_ma) {
+            int ma = bat.current_ma;
+
+            line[n++] = ' ';
+            line[n++] = (ma < 0) ? '-' : '+';
+            n += num(line + n, (u32)(ma < 0 ? -ma : ma));
+            line[n++] = ' ';
+            line[n++] = 'm';
+            line[n++] = 'A';
+        }
         line[n] = 0;
     } else {
         const char *q = "БАТАРЕЯ?";

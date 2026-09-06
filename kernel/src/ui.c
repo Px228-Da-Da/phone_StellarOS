@@ -274,6 +274,23 @@ static void power_task(void *arg)
         struct battery_state st;
 
         battery_read(&st);
+
+        /*
+         * Первый удачный замер печатаем целиком: по этим числам видно,
+         * заработал ли счётчик заряда и насколько поправка на ток
+         * отличается от напряжения на выводах.
+         */
+        {
+            static int told;
+
+            if (st.valid && !told) {
+                told = 1;
+                kprintf("БАТАРЕЯ  : %u мВ, БЕЗ НАГРУЗКИ %u мВ, ТОК %d мА, ЗАРЯД %u%%%s\n",
+                        st.mv, st.ocv_mv, st.current_ma, st.percent,
+                        battery_current_valid() ? "" : " (СЧЁТЧИК МОЛЧИТ)");
+            }
+        }
+
         if (st.valid) {
             update_trend(st.mv);
             if (st.charging) {
