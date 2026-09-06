@@ -7,13 +7,24 @@
 CC     ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -std=gnu99
 
-all: hittis hostrun
+all: hittis hostrun preview
 
 hittis: hittis.c slt.h
 	$(CC) $(CFLAGS) -o $@ hittis.c
 
 hostrun: hostrun.c vm.c vm.h slt.h
 	$(CC) $(CFLAGS) -o $@ hostrun.c vm.c
+
+# Просмотр в настоящем окне. Нужен X11 — в WSL его даёт WSLg.
+# Нет X11 — остаётся hostrun, который печатает рисование словами.
+preview: preview.c vm.c vm.h slt.h manrope.stf
+	$(CC) $(CFLAGS) -o $@ preview.c vm.c -lX11
+
+# Шрифт для просмотра — тот же самый, что уезжает в телефон.
+# Делается здесь, чтобы просмотр работал и без собранного ядра.
+manrope.stf: ../tools/fontgen.c ../fonts/Manrope-SemiBold.ttf
+	$(CC) $(CFLAGS) -o /tmp/hittis-fontgen ../tools/fontgen.c -lm
+	/tmp/hittis-fontgen ../fonts/Manrope-SemiBold.ttf 16,24,32,48 $@
 
 # Собрать и тут же прогнать все приложения из apps/
 check: hittis hostrun
@@ -24,4 +35,4 @@ check: hittis hostrun
 	done
 
 clean:
-	rm -f hittis hostrun
+	rm -f hittis hostrun preview manrope.stf

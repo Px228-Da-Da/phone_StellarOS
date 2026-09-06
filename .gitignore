@@ -8,3 +8,8 @@ out/
 unpacked/
 hittis/hittis
 hittis/hostrun
+
+# Собранные приложения и шрифт просмотра — делаются из исходников
+apps/*.slt
+hittis/manrope.stf
+hittis/preview
