@@ -680,6 +680,53 @@ void window_home(void)
 }
 
 /*
+ * Показать окно этой задачи, если оно спрятано.
+ *
+ * Нужно запускалке: нажатие на плитку уже запущенного приложения должно
+ * возвращать его, а не молчать. Молчание было задумано («второй раз не
+ * запускаем»), но задумано плохо: человек жмёт на приложение, чтобы его
+ * увидеть, а не чтобы узнать, что оно и так работает.
+ *
+ * 0 — окно на экране; -1 — окна нет вовсе, и звавшему стоит запустить
+ * программу заново.
+ */
+int window_raise(u64 task)
+{
+    u64 flags = spin_lock_irq(&win_lock);
+    struct window *win = NULL;
+    u32 x, y;
+
+    for (u32 i = 0; i < WINDOW_MAX; i++) {
+        if (windows[i].owner == task && windows[i].buf) {
+            win = &windows[i];
+            break;
+        }
+    }
+
+    if (!win) {
+        spin_unlock_irq(&win_lock, flags);
+        return -1;
+    }
+
+    if (win->layer >= 0) {
+        spin_unlock_irq(&win_lock, flags);
+        return 0;               /* уже на экране */
+    }
+
+    x = win->x;
+    y = win->y;
+    win->placed = 0;            /* показать заново, как в первый раз */
+    if (hidden_task == task)
+        hidden_task = 0;
+    spin_unlock_irq(&win_lock, flags);
+
+    show_by_layer(win, x, y);
+    win->placed = 1;
+    kprintf("ОКНО     : ЗАДАЧА %lu ВЫЗВАНА НА ЭКРАН\n", task);
+    return 0;
+}
+
+/*
  * Кому принадлежат показанные окна.
  *
  * Нужно вводу: когда под пальцем нет ни одного окна, событие получают

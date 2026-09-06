@@ -265,7 +265,7 @@ static void draw_tile(u32 i)
         const char *note = tile_note[i];
 
         if (i == TILE_APP && app_task)
-            note = "РАБОТАЕТ — ПОЛОСКА ВНИЗУ ПЕРЕКЛЮЧАЕТ";
+            note = "РАБОТАЕТ — НАЖМИ, ЧТОБЫ ВЕРНУТЬ НА ЭКРАН";
         text((u32)x + 24, (u32)(y + 100), 2, COL_DIM, body, note);
     }
 }
@@ -665,8 +665,18 @@ static void launch_app(void)
 {
     s64 id;
 
-    if (app_task)
-        return;
+    /*
+     * Уже запущенное — вернуть на экран, а не молчать. Нажимая на
+     * приложение, человек хочет его увидеть; узнавать от системы, что
+     * оно «и так работает», ему незачем.
+     */
+    if (app_task) {
+        if (window_raise(app_task) == 0) {
+            write("EL0      : ОБОЛОЧКА: ВЕРНУЛА ПРИЛОЖЕНИЕ НА ЭКРАН\n");
+            return;
+        }
+        app_task = 0;           /* окна нет — значит программы больше нет */
+    }
 
     id = spawn(IMG_HITTIS);
     if (id > 0) {

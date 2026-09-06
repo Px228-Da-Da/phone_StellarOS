@@ -111,6 +111,12 @@ static inline void reboot(void)
         ;
 }
 
+/* Показать окно этой задачи: 0 — на экране, -1 — окна нет */
+static inline s64 window_raise(u64 task)
+{
+    return sys(SYS_RAISE, task, 0, 0, 0, 0, 0);
+}
+
 static inline s64 window_close(void)
 {
     return sys(SYS_CLOSE, 0, 0, 0, 0, 0, 0);
