@@ -338,6 +338,8 @@ static int pick_layer(struct window *win)
  */
 static int dumped_layer;
 
+static void window_tell_layers(void);
+
 static void claim_layer(struct window *win, int layer)
 {
     /* Один раз показываем, с чем именно настроен слой: формат пикселя,
@@ -357,6 +359,10 @@ static void claim_layer(struct window *win, int layer)
     win->layer = layer;
     layers_known = 1;
     layers_exist = 1;
+
+    /* Кто занял какой слой — самое частое место ошибок с показом окон */
+    kprintf("ОКНО     : %s ЗАНЯЛА СЛОЙ %d\n", task_name(), layer);
+    window_tell_layers();
 }
 
 static int show_by_layer(struct window *win, u32 x, u32 y)
