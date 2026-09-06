@@ -62,6 +62,7 @@ struct window {
     u32  x, y;
     int  layer;             /* номер занятого слоя или -1           */
     int  told_copy;         /* уже сказали, что идём копией         */
+    int  placed;            /* окно хоть раз показано на экране     */
     u32  moves;             /* сколько раз переезжало по экрану     */
 };
 
@@ -228,14 +229,46 @@ static struct window *holder_of(int layer)
     return NULL;
 }
 
+/*
+ * Что выше, что ниже.
+ *
+ * Слой с бо́льшим номером лежит поверх слоя с меньшим, и до сих пор
+ * номер доставался просто по очереди: кто первым попросил показать, тот
+ * и внизу. На телефоне это сразу вышло боком — приложение успело
+ * показаться раньше оболочки, получило нижний слой, и оболочка во весь
+ * экран накрыла его целиком. Приложение работало, отвечало на касания,
+ * и увидеть его было нельзя.
+ *
+ * Порядок должен получаться из окон, а не из того, кто кого обогнал в
+ * планировщике. Правило простое и совпадает с тем, чего человек ждёт:
+ * окно во весь экран — это фон, оно уходит вниз, а всё, что меньше,
+ * ложится сверху. Настоящий разбор порядка окон появится вместе с
+ * управлением ими; пока размер — единственный признак, который у нас
+ * есть, и он даёт один и тот же ответ независимо от порядка запуска.
+ */
+static int window_is_backdrop(const struct window *win)
+{
+    u64 base;
+    u32 sw, sh, stride;
+
+    fb_info(&base, &sw, &sh, &stride);
+    return sw && sh && win->w >= sw && win->h >= sh;
+}
+
 static int pick_layer(struct window *win)
 {
     if (win->layer >= 0)
         return win->layer;
 
-    for (int l = WINDOW_LAYER_FIRST; l <= WINDOW_LAYER_LAST; l++)
-        if (!layer_taken[l])
-            return l;
+    if (window_is_backdrop(win)) {
+        for (int l = WINDOW_LAYER_FIRST; l <= WINDOW_LAYER_LAST; l++)
+            if (!layer_taken[l])
+                return l;
+    } else {
+        for (int l = WINDOW_LAYER_LAST; l >= WINDOW_LAYER_FIRST; l--)
+            if (!layer_taken[l])
+                return l;
+    }
 
     if (!win->moves)
         return -1;              /* сами стоим — обойдёмся копией */
@@ -429,9 +462,47 @@ int window_present(u32 x, u32 y)
     if (rc == 0) {
         win->x = x;
         win->y = y;
+        win->placed = 1;
     }
 
     return rc;
+}
+
+/*
+ * Кому адресовано касание в этой точке.
+ *
+ * Возвращает задачу — хозяйку верхнего окна, накрывающего точку, или 0,
+ * если под пальцем нет ни одного окна.
+ *
+ * До сих пор касание получали ВСЕ подписчики сразу, и пока окно было
+ * одно, разницы не было. С двумя стало видно, что это неправильно:
+ * палец нажимал плитку приложения — и одновременно плитку оболочки под
+ * ним. Человек трогает то, что видит, а видит он верхнее окно.
+ *
+ * «Верхнее» здесь — то же самое, чем определяется вид на экране: номер
+ * слоя. Окно без слоя показано копией и лежит ниже любого слоя.
+ */
+u64 window_owner_at(u32 x, u32 y)
+{
+    u64 flags = spin_lock_irq(&win_lock);
+    u64 owner = 0;
+    int best = -2;
+
+    for (u32 i = 0; i < WINDOW_MAX; i++) {
+        struct window *w = &windows[i];
+
+        if (!w->owner || !w->placed)
+            continue;
+        if (x < w->x || y < w->y || x >= w->x + w->w || y >= w->y + w->h)
+            continue;
+        if (w->layer > best) {
+            best = w->layer;
+            owner = w->owner;
+        }
+    }
+
+    spin_unlock_irq(&win_lock, flags);
+    return owner;
 }
 
 /*

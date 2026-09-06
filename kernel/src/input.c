@@ -13,6 +13,7 @@
  * придётся только эту задачу.
  */
 #include "input.h"
+#include "window.h"
 #include "sched.h"
 #include "nvt.h"
 #include "sched.h"
@@ -72,12 +73,18 @@ static struct {
  * Нажатие и отпускание не заменяются никогда: их пропуск меняет смысл
  * происходящего, а не точность.
  */
-static void subs_push_locked(const struct input_event *e)
+static void subs_push_locked(const struct input_event *e, u64 target)
 {
     for (u32 i = 0; i < SUB_MAX; i++) {
         u32 next;
 
         if (!subs[i].owner)
+            continue;
+
+        /* Касание достаётся тому, чьё окно под пальцем. 0 — окна там
+         * нет, и событие получают все: иначе программа без окна вообще
+         * не узнала бы о касаниях. */
+        if (target && subs[i].owner != target)
             continue;
 
         if (e->action == TOUCH_MOVE && subs[i].head != subs[i].tail) {
@@ -142,11 +149,42 @@ void input_unsubscribe(u64 task)
     spin_unlock_irq(&input_lock, flags);
 }
 
+/*
+ * За кем закреплён палец, пока его не отпустили.
+ *
+ * Адресата ищем один раз — при нажатии, — и держим до отпускания.
+ * Иначе жест, начатый в окне приложения и уведённый за его край,
+ * посреди движения достался бы соседу: тот получил бы «ведут» без
+ * «нажали», а начавший — «нажали» без «отпустили». Так ведёт себя
+ * всякий приличный интерфейс, и причина везде одна.
+ */
+static u64 grabbed[MAX_FINGERS + 1];
+
 static void event_push(u8 id, u8 action, u16 x, u16 y)
 {
-    u32 next = (ring_head + 1) & (EVENT_RING - 1);
-    u64 flags = spin_lock_irq(&input_lock);
+    u32 next;
+    u64 flags;
+    u64 target;
     struct input_event ev;
+
+    /*
+     * Кому адресовано, спрашиваем ДО замка ввода: window_owner_at берёт
+     * свой замок, и брать его под нашим значило бы завести порядок
+     * «ввод, затем окна», обратный которому где-нибудь однажды
+     * встретится. Взаимная блокировка ищется потом неделями.
+     */
+    if (action == TOUCH_DOWN || !grabbed[id])
+        target = window_owner_at(x, y);
+    else
+        target = grabbed[id];
+
+    if (action == TOUCH_UP)
+        grabbed[id] = 0;
+    else
+        grabbed[id] = target;
+
+    next = (ring_head + 1) & (EVENT_RING - 1);
+    flags = spin_lock_irq(&input_lock);
 
     ev.id = id;
     ev.action = action;
@@ -194,7 +232,7 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
 
     /* Каждому подписчику своя копия: они забирают из своих очередей, а
      * не наперегонки из общей. */
-    subs_push_locked(&ev);
+    subs_push_locked(&ev, target);
     spin_unlock_irq(&input_lock, flags);
 
     /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий
