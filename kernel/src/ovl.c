@@ -288,6 +288,39 @@ void ovl_layer_alpha(u32 layer, u32 alpha)
     dsb();
 }
 
+/*
+ * Что оверлей делает прямо сейчас.
+ *
+ * Системные полосы живут в нулевом слое: рабочую область целиком
+ * закрывает окно оболочки на своём слое, и кадр виден только в двух
+ * узких щелях сверху и снизу. Значит, если пропадают ОБЕ полосы разом,
+ * дело не в том, кто и как рисует надписи, а в самом нулевом слое.
+ *
+ * Признаки прерываний читаем и тут же сбрасываем: они накапливаются
+ * сами, и следующий отчёт покажет ровно то, что случилось за прошедшие
+ * десять секунд. Переполнение выборки — как раз такой признак: оно
+ * длится один кадр и никаким снимком регистров не ловится.
+ */
+void ovl_report(void)
+{
+    kprintf("OVL      : SRC_CON %08x ROI %08x STA %08x INTSTA %08x\n",
+            mmio_read32(MT_DISP_OVL0_BASE + OVL_SRC_CON),
+            mmio_read32(MT_DISP_OVL0_BASE + OVL_ROI_SIZE),
+            mmio_read32(MT_DISP_OVL0_BASE + OVL_STA),
+            mmio_read32(MT_DISP_OVL0_BASE + OVL_INTSTA));
+
+    for (u32 i = 0; i < OVL_LAYERS; i++)
+        kprintf("         СЛОЙ %u: CON %08x РАЗМ %08x СМЕЩ %08x АДРЕС %08x ЧТЕНИЕ %u\n",
+                i,
+                mmio_read32(lreg(i, OVL_L0_CON)),
+                mmio_read32(lreg(i, OVL_L0_SRC_SIZE)),
+                mmio_read32(lreg(i, OVL_L0_OFFSET)),
+                mmio_read32(lreg(i, OVL_L0_ADDR)),
+                mmio_read32(lreg(i, OVL_RDMA0_CTRL)) & 1);
+
+    mmio_write32(MT_DISP_OVL0_BASE + OVL_INTSTA, 0);
+}
+
 void ovl_layer_off(u32 layer)
 {
     if (layer == 0 || layer >= OVL_LAYERS)
@@ -298,6 +331,7 @@ void ovl_layer_off(u32 layer)
 #else   /* в эмуляторе слоёв нет: там кадр один и складывать нечего */
 
 void ovl_dump(void) { }
+void ovl_report(void) { }
 int  ovl_layer_set(u32 l, const volatile void *b, u32 x, u32 y,
                    u32 w, u32 h, u32 p, u32 a)
 {

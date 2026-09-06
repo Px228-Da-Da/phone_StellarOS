@@ -62,6 +62,10 @@ void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
  * кадр всё, что не должно мигать. */
 void fb_blit(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 src_pitch);
 
+/* Сторож системных полос: включается, когда загрузка закончена и в них
+ * не должен писать больше никто. Всякую чужую запись называет поимённо. */
+void fb_watch_strips(int on);
+
 void fb_panic_text(u32 line, const char *s);
 u32  fb_text_width(u32 scale, const char *s);
 void fb_info(u64 *base, u32 *w, u32 *h, u32 *stride);

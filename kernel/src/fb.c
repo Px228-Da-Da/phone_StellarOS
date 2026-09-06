@@ -16,6 +16,7 @@
 #include "pmm.h"
 #include "mmu.h"
 #include "print.h"
+#include "sched.h"
 
 #include "font.h"
 
@@ -34,6 +35,11 @@ extern const u8 font_cyr[33][8];
 #define GLYPH_W       (8 * fb.scale)
 #define GLYPH_H       (8 * fb.scale)
 #define MARGIN        8
+
+/* Высоты системных полос — те же, что в uiarea.h; здесь они нужны
+ * только сторожу, и тянуть заголовок интерфейса в драйвер незачем. */
+#define STRIP_STATUS  96
+#define STRIP_HOME    48
 
 static struct {
     volatile u32 *base;                 /* куда рисуем прямо сейчас */
@@ -532,10 +538,55 @@ void fb_info(u64 *base, u32 *w, u32 *h, u32 *stride)
 
 void fb_set_colors(u32 fg, u32 bg) { fb.fg = fg; fb.bg = bg; }
 
+
+/*
+ * Сторож системных полос.
+ *
+ * После загрузки в две узкие полосы сверху и снизу пишет ровно одно
+ * место — часы и заряд, и пишет одним проходом. Всякая другая запись
+ * туда и есть то, из-за чего полосы мигают: сначала кто-то кладёт фон,
+ * потом надпись возвращается на место, и человек видит пустоту между
+ * этими двумя мгновениями.
+ *
+ * Найти такого писателя перебором исходников не выходит — вызовов
+ * заливки в ядре десятки, и каждый по отдельности выглядит невинно.
+ * Поэтому спрашиваем не код, а систему: пусть назовётся сама.
+ */
+static int strip_watch;
+static u32 strip_told;
+
+void fb_watch_strips(int on)
+{
+    strip_watch = on;
+    strip_told = 0;
+}
+
+static void strip_check(const char *what, u32 y, u32 h)
+{
+    u32 bot;
+
+    if (!strip_watch || !fb.ready)
+        return;
+
+    bot = (fb.height > STRIP_HOME) ? fb.height - STRIP_HOME : fb.height;
+    if (y >= STRIP_STATUS && y + h <= bot)
+        return;                 /* внутри рабочей области — не наше дело */
+
+    /* Двенадцати хватит, чтобы назвать виновного: дальше это был бы не
+     * отчёт, а забитое кольцо консоли. */
+    if (strip_told >= 12)
+        return;
+    strip_told++;
+
+    kprintf("ПОЛОСЫ   : В НИХ ПИШЕТ %s, СТРОКИ %u..%u, ЗАДАЧА %s\n",
+            what, y, y + h, task_name());
+}
+
 void fb_clear(u32 color)
 {
     if (!fb.ready)
         return;
+    strip_check("ЗАЛИВКА КАДРА", 0, fb.height);
     for (u32 y = 0; y < fb.height; y++) {
         volatile u32 *row = fb.base + (u64)y * fb.stride_px;
         for (u32 x = 0; x < fb.width; x++)
@@ -554,6 +605,7 @@ void fb_fill_rect(u32 x0, u32 y0, u32 w, u32 h, u32 color)
         return;
     if (x0 + w > fb.width)  w = fb.width  - x0;
     if (y0 + h > fb.height) h = fb.height - y0;
+    strip_check("ПРЯМОУГОЛЬНИК", y0, h);
 
     for (u32 y = 0; y < h; y++) {
         volatile u32 *row = fb.base + (u64)(y0 + y) * fb.stride_px + x0;
