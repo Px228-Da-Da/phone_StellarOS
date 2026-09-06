@@ -130,6 +130,7 @@ static u64 frame_told;
 /* Кнопка перезагрузки */
 static int reboot_armed;
 static u64 armed_at;
+static u64 last_seen_ms;     /* когда последний раз слышали палец */
 
 static const char *const tile_name[TILE_COUNT] = {
     "ЭКРАН", "КАСАНИЯ", "ПАМЯТЬ", "ЯДРА", "ОКНА",
@@ -808,7 +809,29 @@ void _start(void)
          */
         got = moving ? input_wait(&t, 1) : input(&t);
 
+        /*
+         * Палец, о котором давно ничего не слышно, считаем отпущенным.
+         *
+         * Событие «отпустили» может не дойти — потеряться в очереди,
+         * уйти системе, не случиться вовсе. Программа, которая на него
+         * рассчитывает безоговорочно, залипает навсегда: считает, что
+         * палец на экране, перерисовывается без остановки и не выбирает
+         * ничего. Так и было, и лечить это только в ядре мало —
+         * приличная программа должна переживать потерю события.
+         */
+        if (touching && uptime_ms() - last_seen_ms > 500) {
+            struct touch fake;
+
+            fake.x = (u16)down_x;
+            fake.y = (u16)down_y;
+            fake.id = 0;
+            fake.action = TOUCH_UP;
+            on_up(&fake);
+            redraw = 1;
+        }
+
         if (got == 1) {
+            last_seen_ms = uptime_ms();
             if (t.action == TOUCH_DOWN)
                 on_down(&t);
             else if (t.action == TOUCH_MOVE)
