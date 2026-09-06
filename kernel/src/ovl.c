@@ -303,6 +303,19 @@ void ovl_layer_alpha(u32 layer, u32 alpha)
  */
 void ovl_report(void)
 {
+    static u32 told, was_src;
+    u32 src = mmio_read32(MT_DISP_OVL0_BASE + OVL_SRC_CON);
+
+    /*
+     * Полный отчёт — первые три раза и потом только когда что-то
+     * изменилось. Кольцо консоли шестнадцать килобайт, и подробность
+     * раз в десять секунд вытеснила бы из него всю загрузку.
+     */
+    if (told >= 3 && src == was_src && !fb_ovl_seen)
+        return;
+    told++;
+    was_src = src;
+
     kprintf("OVL      : SRC_CON %08x ROI %08x STA %08x INTSTA %08x\n",
             mmio_read32(MT_DISP_OVL0_BASE + OVL_SRC_CON),
             mmio_read32(MT_DISP_OVL0_BASE + OVL_ROI_SIZE),
@@ -318,6 +331,8 @@ void ovl_report(void)
                 mmio_read32(lreg(i, OVL_L0_ADDR)),
                 mmio_read32(lreg(i, OVL_RDMA0_CTRL)) & 1);
 
+    kprintf("         НАКОПЛЕНО ПРИЗНАКОВ %08x\n", fb_ovl_seen);
+    fb_ovl_seen = 0;
     mmio_write32(MT_DISP_OVL0_BASE + OVL_INTSTA, 0);
 }
 
