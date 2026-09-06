@@ -232,7 +232,7 @@ static const char page[] =
 "body{background:#0b0f1a;color:#8fa3c8;font:14px system-ui;margin:0;"
 "display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}"
 "img{image-rendering:pixelated;border-radius:8px;box-shadow:0 8px 40px #0008;"
-"cursor:crosshair;user-select:none}"
+"cursor:crosshair;user-select:none;max-height:88vh;width:auto}"
 "b{color:#cfe0ff}"
 "</style>"
 "<div><b id=n>приложение</b> — мышь работает пальцем, "
@@ -241,8 +241,12 @@ static const char page[] =
 "<script>"
 "let v=-1,down=false;"
 "const e=document.getElementById('e');"
+/* Кадр телефона выше окна браузера, поэтому картинку ужимаем — и
+ * координаты щелчка возвращаем обратно в пиксели приложения. Без
+ * этого палец попадал бы не туда, куда человек смотрит. */
 "function pos(ev){const r=e.getBoundingClientRect();"
-"return[Math.round(ev.clientX-r.left),Math.round(ev.clientY-r.top)];}"
+"const kx=e.naturalWidth/r.width,ky=e.naturalHeight/r.height;"
+"return[Math.round((ev.clientX-r.left)*kx),Math.round((ev.clientY-r.top)*ky)];}"
 "function send(a,ev){const p=pos(ev);"
 "fetch('/t?a='+a+'&x='+p[0]+'&y='+p[1]);}"
 "e.addEventListener('mousedown',ev=>{down=true;send(0,ev);ev.preventDefault();});"

@@ -11,6 +11,8 @@
 #include "fb.h"
 #include "font.h"
 #include "splash.h"
+#include "uiarea.h"
+#include "window.h"
 #include "mmu.h"
 #include "gic.h"
 #include "timer.h"
@@ -1865,8 +1867,19 @@ static void boot_task(void *arg)
     /* Первая программа на Си: проверяет путь сборки целиком */
     uspace_spawn_image(IMG_HELLO_C);
 
-    /* Оболочка — теперь программа. Ядро интерфейсом больше не занято. */
-    uspace_spawn_image(IMG_SHELL);
+    /*
+     * Оболочка — теперь программа. Ядро интерфейсом больше не занято.
+     *
+     * И она же фон: приложения открываются во всю рабочую область, ровно
+     * как она, и по размеру их не различить. Кто здесь оболочка, знает
+     * только тот, кто её запускал.
+     */
+    {
+        s64 shell = uspace_spawn_image(IMG_SHELL);
+
+        if (shell > 0)
+            window_set_backdrop((u64)shell);
+    }
 
     /*
      * Приложение на Hittis. Ядро про этот язык не знает ничего: оно
@@ -1903,6 +1916,12 @@ static void boot_task(void *arg)
     /* Оболочка на экране — заставке пора уйти */
     splash_stage(SPLASH_SHELL);
     splash_finish();
+
+    /*
+     * Системные полосы. Заводим ПОСЛЕ заставки: она чистит кадр за
+     * собой, и нарисованное раньше всё равно бы стёрлось.
+     */
+    ui_status_start();
 
     /* Сборщик и проверка того, что после него память возвращается */
     sched_start_reaper();

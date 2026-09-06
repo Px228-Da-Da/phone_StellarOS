@@ -22,6 +22,7 @@
 #include "io.h"
 #include "uspace.h"
 #include "window.h"
+#include "uiarea.h"
 #include "input.h"
 #include "fb.h"
 
@@ -330,10 +331,15 @@ static void syscall(struct trapframe *f)
         return;
 
     case SYS_SCREEN: {
-        u64 base;
-        u32 w, h, stride;
+        u32 w, h;
 
-        fb_info(&base, &w, &h, &stride);
+        /*
+         * Отдаём размер РАБОЧЕЙ ОБЛАСТИ, а не панели. Другого экрана у
+         * приложения нет: полосы сверху и снизу принадлежат системе, и
+         * знать про них программе незачем — она всё равно туда не
+         * дотянется.
+         */
+        ui_area(NULL, NULL, &w, &h);
         f->x[0] = ((u64)w << 32) | h;
         return;
     }

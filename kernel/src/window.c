@@ -29,6 +29,7 @@
 #include "print.h"
 #include "string.h"
 #include "spinlock.h"
+#include "uiarea.h"
 #include "io.h"
 
 /* Адрес окна в пространстве программы: у всех один и тот же, потому что
@@ -72,6 +73,19 @@ static struct window windows[WINDOW_MAX];
 
 /* Кто какой слой занимает: индекс — номер слоя, значение — задача */
 static u64 layer_taken[OVL_LAYERS];
+
+/*
+ * Оболочка — фон, поверх которого живут приложения.
+ *
+ * Раньше фон определялся размером: окно во весь экран — значит фон. Пока
+ * приложения были меньше экрана, это работало; теперь они занимают всю
+ * рабочую область, ровно как оболочка, и по размеру их не различить.
+ * Кто здесь фон, знает только тот, кто их запускал, — ядро.
+ */
+static u64 backdrop_task;
+
+/* Окно, снятое с показа кнопкой «домой»: его можно вернуть */
+static u64 hidden_task;
 
 /*
  * Есть ли на этой плате слои вообще.
@@ -128,6 +142,24 @@ u64 window_open(u32 w, u32 h)
     u64 task = task_id();
     u64 flags;
     void *buf;
+
+    /*
+     * Больше рабочей области окна не бывает.
+     *
+     * Приложение просит размер, но последнее слово за системой: сверху
+     * полоса состояния, снизу полоска «домой», и они принадлежат ей.
+     * Обрезаем молча — приложение с флешки не обязано знать, какой у
+     * этого телефона экран и что на нём уже занято.
+     */
+    {
+        u32 aw, ah;
+
+        ui_area(NULL, NULL, &aw, &ah);
+        if (aw && w > aw)
+            w = aw;
+        if (ah && h > ah)
+            h = ah;
+    }
 
     if (!w || !h || (u64)w * h * 4 > WINDOW_BYTES)
         return 0;
@@ -254,8 +286,17 @@ static int window_is_backdrop(const struct window *win)
     u64 base;
     u32 sw, sh, stride;
 
+    /* Названный фон — фон, и размер тут ни при чём */
+    if (backdrop_task && win->owner == backdrop_task)
+        return 1;
+
     fb_info(&base, &sw, &sh, &stride);
     return sw && sh && win->w >= sw && win->h >= sh;
+}
+
+void window_set_backdrop(u64 task)
+{
+    backdrop_task = task;
 }
 
 static int pick_layer(struct window *win)
@@ -423,9 +464,23 @@ int window_present(u32 x, u32 y)
 {
     struct window *win = window_of(task_id());
     int rc;
+    u32 ax, ay, aw, ah;
 
     if (!win || !win->buf)
         return -1;
+
+    /*
+     * Координаты приходят от программы и отсчитываются от рабочей
+     * области, а не от экрана. Так у приложения нет способа залезть под
+     * полосу состояния — даже случайно, даже ошибкой в арифметике.
+     */
+    ui_area(&ax, &ay, &aw, &ah);
+    if (win->w < aw && x > aw - win->w)
+        x = aw - win->w;
+    if (win->h < ah && y > ah - win->h)
+        y = ah - win->h;
+    x += ax;
+    y += ay;
 
     if (win->x != x || win->y != y)
         win->moves++;
@@ -526,6 +581,60 @@ u64 window_owner_at(u32 x, u32 y)
 
     spin_unlock_irq(&win_lock, flags);
     return owner;
+}
+
+/*
+ * Кнопка «домой»: спрятать приложение или вернуть его.
+ *
+ * Пока приложение занимает всю рабочую область, оболочки под ним не
+ * видно вовсе, и без этого переключателя к ней нельзя было бы
+ * вернуться. Приложение при этом продолжает жить: мы всего лишь
+ * отпускаем его слой, а буфер и сама программа остаются целы — вернём
+ * слой, и на экране окажется тот же кадр, на котором его прервали.
+ */
+void window_home(void)
+{
+    u64 flags = spin_lock_irq(&win_lock);
+    struct window *hide = NULL, *back = NULL;
+
+    for (u32 i = 0; i < WINDOW_MAX; i++) {
+        struct window *w = &windows[i];
+
+        if (!w->owner || !w->placed)
+            continue;
+        if (backdrop_task && w->owner == backdrop_task)
+            continue;
+        if (w->owner == hidden_task) {
+            back = w;
+            continue;
+        }
+        if (w->layer >= 0)
+            hide = w;
+    }
+
+    if (hide) {
+        ovl_layer_off(hide->layer);
+        layer_taken[hide->layer] = 0;
+        hide->layer = -1;
+        hidden_task = hide->owner;
+        spin_unlock_irq(&win_lock, flags);
+        kprintf("ОКНО     : ПРИЛОЖЕНИЕ СПРЯТАНО, ВИДНА ОБОЛОЧКА\n");
+        return;
+    }
+
+    if (back) {
+        u32 x = back->x, y = back->y;
+
+        back->placed = 0;       /* показать заново, как в первый раз */
+        hidden_task = 0;
+        spin_unlock_irq(&win_lock, flags);
+        show_by_layer(back, x, y);
+        back->placed = 1;
+        kprintf("ОКНО     : ПРИЛОЖЕНИЕ ВЕРНУЛОСЬ\n");
+        return;
+    }
+
+    spin_unlock_irq(&win_lock, flags);
 }
 
 /*
