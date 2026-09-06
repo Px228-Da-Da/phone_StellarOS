@@ -845,6 +845,34 @@ void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
     }
 }
 
+/*
+ * Перенести готовый прямоугольник в кадр.
+ *
+ * Нужен всему, что рисуется прямо в кадр и должно не мигать: панель
+ * читает кадр непрерывно, и любая двухходовка «стереть, потом написать»
+ * ей видна. Собрал картинку в стороне — перенёс одним проходом, и
+ * каждый пиксель кадра меняется ровно один раз.
+ */
+void fb_blit(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 src_pitch)
+{
+    if (!fb.ready || !src)
+        return;
+
+    for (u32 row = 0; row < h; row++) {
+        u32 dy = y + row;
+
+        if (dy >= fb.height)
+            return;
+        for (u32 col = 0; col < w; col++) {
+            u32 dx = x + col;
+
+            if (dx >= fb.width)
+                break;
+            fb.base[(u64)dy * fb.stride_px + dx] = src[(u64)row * src_pitch + col];
+        }
+    }
+}
+
 void fb_panic_text(u32 line, const char *s)
 {
     if (!fb.ready || !s)
