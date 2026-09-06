@@ -165,7 +165,8 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
     u32 next;
     u64 flags;
     u64 target;
-    struct input_event ev;
+    u16 sub_x = x, sub_y = y;
+    struct input_event ev, sub_ev;
 
     /*
      * Кому адресовано, спрашиваем ДО замка ввода: window_owner_at берёт
@@ -182,6 +183,24 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
         grabbed[id] = 0;
     else
         grabbed[id] = target;
+
+    /*
+     * Адресату отдаём точку в координатах ЕГО окна.
+     *
+     * Программа рисует у себя от нуля и не знает, куда система поставила
+     * её окно, — и знать не должна: окно может переехать, а разбор
+     * касаний в программе от этого меняться не обязан. В общую очередь
+     * ядра событие по-прежнему кладётся в координатах экрана: там оно
+     * про экран, а не про чьё-то окно.
+     */
+    if (target) {
+        u32 ox, oy;
+
+        if (window_origin_of(target, &ox, &oy) == 0) {
+            sub_x = (x > ox) ? (u16)(x - ox) : 0;
+            sub_y = (y > oy) ? (u16)(y - oy) : 0;
+        }
+    }
 
     next = (ring_head + 1) & (EVENT_RING - 1);
     flags = spin_lock_irq(&input_lock);
@@ -232,7 +251,10 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
 
     /* Каждому подписчику своя копия: они забирают из своих очередей, а
      * не наперегонки из общей. */
-    subs_push_locked(&ev, target);
+    sub_ev = ev;
+    sub_ev.x = sub_x;
+    sub_ev.y = sub_y;
+    subs_push_locked(&sub_ev, target);
     spin_unlock_irq(&input_lock, flags);
 
     /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий

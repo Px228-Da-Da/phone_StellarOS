@@ -100,4 +100,7 @@ void window_task_gone(u64 task, u64 ttbr0);
 /* Кому адресовано касание в точке: задача-хозяйка верхнего окна, 0 — никому */
 u64 window_owner_at(u32 x, u32 y);
 
+/* Где стоит окно задачи: 0 и начало окна, если оно показано */
+int window_origin_of(u64 task, u32 *x, u32 *y);
+
 #endif
