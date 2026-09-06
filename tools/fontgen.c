@@ -588,6 +588,7 @@ int main(int argc, char **argv)
 {
     FILE *f, *out;
     int sizes[8], nsizes = 0;
+    const char *face_chars[8];
     long head, hhea, hmtx;
     u16 units, nhm;
     double asc, desc;
@@ -616,15 +617,33 @@ int main(int argc, char **argv)
     }
     fclose(f);
 
+    /*
+     * Описание начертаний: "16,24,32,48,140:StellarOS".
+     *
+     * Двоеточие ограничивает набор знаков. Нужно ради логотипа: крупный
+     * кегль со всеми знаками весит под мегабайт, а на заставке нужны
+     * ровно буквы названия. Платить мегабайтом за то, что показывается
+     * один раз при загрузке, — расточительство, которое потом не
+     * вычистить.
+     */
     {
         const char *p = argv[2];
 
         while (*p && nsizes < 8) {
-            sizes[nsizes++] = atoi(p);
-            while (*p && *p != ',')
+            sizes[nsizes] = atoi(p);
+            face_chars[nsizes] = NULL;
+            while (*p && *p != ',' && *p != ':')
                 p++;
-            if (*p == ',')
+            if (*p == ':') {
+                face_chars[nsizes] = ++p;
+                while (*p && *p != ',')
+                    p++;
+            }
+            nsizes++;
+            if (*p == ',') {
+                *(char *)p = 0;         /* обрезаем список знаков */
                 p++;
+            }
         }
     }
 
@@ -683,11 +702,40 @@ int main(int argc, char **argv)
         int px = sizes[si];
         u32 total = 0;
         int used = 0;
+        u32 own[64];
+        const u32 *set = charset;
+        int nset = ncs;
 
         px_scale = (double)px / units;
 
-        for (int i = 0; i < ncs; i++) {
-            u32 gid = glyph_of(charset[i]);
+        if (face_chars[si]) {           /* только названные знаки */
+            const unsigned char *q = (const unsigned char *)face_chars[si];
+            int n = 0;
+
+            while (*q && n < 64) {
+                u32 cp = *q++;
+
+                if (cp >= 0xC0 && cp <= 0xDF && (*q & 0xC0) == 0x80) {
+                    cp = ((cp & 0x1F) << 6) | (*q & 0x3F);
+                    q++;
+                }
+                own[n++] = cp;
+            }
+            /* по возрастанию: ядро ищет знак двоичным поиском */
+            for (int a = 0; a < n; a++)
+                for (int b = a + 1; b < n; b++)
+                    if (own[b] < own[a]) {
+                        u32 t = own[a];
+
+                        own[a] = own[b];
+                        own[b] = t;
+                    }
+            set = own;
+            nset = n;
+        }
+
+        for (int i = 0; i < nset; i++) {
+            u32 gid = glyph_of(set[i]);
             int gx, gy, gw, gh;
             u8 *bits;
             u32 adv;
@@ -700,7 +748,7 @@ int main(int argc, char **argv)
             adv = (gid < nhm) ? rd16(hmtx + (long)gid * 4)
                               : rd16(hmtx + (long)(nhm - 1) * 4);
 
-            gl[used].code = charset[i];
+            gl[used].code = set[i];
             gl[used].w = (u8)gw;
             gl[used].h = (u8)gh;
             gl[used].left = (signed char)gx;

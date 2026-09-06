@@ -10,6 +10,7 @@
 #include "print.h"
 #include "fb.h"
 #include "font.h"
+#include "splash.h"
 #include "mmu.h"
 #include "gic.h"
 #include "timer.h"
@@ -1138,6 +1139,22 @@ void kmain(u64 dtb_phys)
         fb_set_colors(COLOR_GREEN, COLOR_BLACK);
         fb_clear(COLOR_BLACK);
         banner();
+
+        /*
+         * Дальше экран занимает заставка, а лог уходит только в USB.
+         *
+         * Зелёный лог на экране честный, но обращён к тому, кто его
+         * писал; всем остальным он сообщает лишь «что-то происходит, и,
+         * кажется, не то». Вернуть его на экран: make BOOTLOG=1 — тогда
+         * заставки нет вовсе, и видно каждую строку загрузки.
+         */
+#ifdef BOOTLOG
+        (void)0;
+#else
+        splash_show();
+        splash_stage(SPLASH_SCREEN);
+        kprint_to_fb(0);
+#endif
     }
 
     /*
@@ -1305,6 +1322,7 @@ void kmain(u64 dtb_phys)
                     }
                 }
             }
+            splash_stage(SPLASH_CONSOLE);
             kprintf("USB: ИТОГ — ЗАПРОСОВ %u, %s\n", usb_setup_count,
                     usb_ready() ? "ПЕРЕЧИСЛЕНЫ" : "НЕ ПЕРЕЧИСЛЕНЫ");
 #if defined(BOARD_MERLIN)
@@ -1316,7 +1334,11 @@ void kmain(u64 dtb_phys)
     }
     HALT_STAGE(19);                          /* замереть на чистом экране */
 
-    fb_flip_demo();
+    /* Демонстрация двойной буферизации рисует поверх заставки, поэтому
+     * под отладку: в обычной загрузке ту же двойную буферизацию
+     * проверяет собой сама заставка. */
+    if (HALT_AT_OR_ZERO)
+        fb_flip_demo();
     kprint_to_fb(0);     /* кадр нужен под слои, а не под текст */
     /* Показ слоёв тоже под отладку: в обычной работе слои заняты
      * оболочкой, и две демонстрации мешали бы друг другу. */
@@ -1328,6 +1350,8 @@ void kmain(u64 dtb_phys)
     /* Прерывания. Порядок жёсткий: сперва контроллер, потом таймер
      * (он прописывает себя в контроллер), и только в самом конце снимаем
      * маску DAIF.I. Снять её раньше — поймать прерывание без обработчика. */
+    splash_stage(SPLASH_MEMORY);
+
     if (gic_init() == 0 && timer_init(TIMER_HZ) == 0) {
         irq_enable();
         irq_ok = irq_works();
@@ -1375,7 +1399,9 @@ void kmain(u64 dtb_phys)
      * под свою idle-задачу и включать себе таймер. */
     sched_init();
     sched_init_cpu();
+    splash_stage(SPLASH_IRQ);
     smp_start_secondaries();
+    splash_stage(SPLASH_CPUS);
     smp_dump();
     HALT_STAGE(7);                          /* восемь ядер подняты */
 
@@ -1398,6 +1424,9 @@ void kmain(u64 dtb_phys)
      * Задача конкурирует за процессор наравне со всеми, и ничего этого
      * больше не может случиться.
      */
+    /* Заставка — обычная задача: пока она рисует, ядро занимается делом,
+     * и наоборот. Первая задача в списке, чтобы движение началось сразу. */
+    task_create("заставка", splash_task, NULL);
     task_create("загрузка", boot_task, NULL);
 
     /* CPU0 дальше живёт как все: раздаёт себя очереди задач.
@@ -1733,6 +1762,9 @@ static void heartbeat_task(void *arg)
  */
 static void boot_task(void *arg)
 {
+    /* Планировщик раздаёт время — это уже полноценная система */
+    splash_stage(SPLASH_TASKS);
+
     (void)arg;
 
     /* Задачи. Их подхватит любое свободное ядро — очередь одна на всех. */
@@ -1798,6 +1830,8 @@ static void boot_task(void *arg)
      * успевает вытесниться. Дамп на два десятка строк ровно так и
      * пропал в первый раз.
      */
+    splash_stage(SPLASH_PROGRAMS);
+
     emmc_probe();
 
     /*
@@ -1806,6 +1840,10 @@ static void boot_task(void *arg)
      * В консоль по USB он идёт по-прежнему.
      */
     kprint_to_fb(0);
+
+    /* Оболочка на экране — заставке пора уйти */
+    splash_stage(SPLASH_SHELL);
+    splash_finish();
 
     /* Сборщик и проверка того, что после него память возвращается */
     sched_start_reaper();
