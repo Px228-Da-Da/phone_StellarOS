@@ -114,6 +114,22 @@ $(BUILD)/user:
 # ждёт ядро.
 USER_DEPS := user/ulib.h include/syscall.h user/user.ld
 
+# --- Шрифт ---
+#
+# Manrope растрируется при сборке: ядру нужны пиксели, а не кривые —
+# разбирать TrueType на телефоне не на чем и незачем. Кегли те же, что
+# просит интерфейс (scale 2,3,4,6 в вызовах вывода текста).
+$(BUILD)/host/fontgen: ../tools/fontgen.c
+	@mkdir -p $(BUILD)/host
+	$(HOSTCC) -O2 -o $@ $< -lm
+
+$(BUILD)/font/manrope.stf: ../fonts/Manrope-SemiBold.ttf $(BUILD)/host/fontgen
+	@mkdir -p $(BUILD)/font
+	$(BUILD)/host/fontgen $< 16,24,32,48 $@
+
+# font_data.S вшивает шрифт, поэтому пересобирается вместе с ним
+$(BUILD)/font_data.o: $(BUILD)/font/manrope.stf
+
 # --- Приложения на Hittis ---
 
 $(BUILD)/host/hittis: $(HITTIS)/hittis.c $(HITTIS)/slt.h

@@ -17,6 +17,8 @@
 #include "mmu.h"
 #include "print.h"
 
+#include "font.h"
+
 extern const u8 font8x8[64][8];
 extern const u8 font_cyr[33][8];
 
@@ -622,36 +624,6 @@ static void draw_glyph(u32 cp, u32 px, u32 py)
  * пиксели самих букв, а картинка под ними остаётся. Сплошной прямоугольник
  * под каждой подписью выглядел бы заплаткой.
  */
-static void draw_glyph_ex(u32 cp, u32 px, u32 py, u32 scale,
-                          u32 fg, u32 bg, int opaque_bg)
-{
-    const u8 *glyph = glyph_for(cp);
-
-    for (u32 row = 0; row < 8; row++) {
-        u8 bits = glyph[row];
-
-        for (u32 col = 0; col < 8; col++) {
-            int on = (bits & (0x80 >> col)) != 0;
-
-            if (!on && !opaque_bg)
-                continue;
-            for (u32 sy = 0; sy < scale; sy++) {
-                u32 y = py + row * scale + sy;
-
-                if (y >= fb.height)
-                    return;
-                for (u32 sx = 0; sx < scale; sx++) {
-                    u32 x = px + col * scale + sx;
-
-                    if (x >= fb.width)
-                        break;
-                    fb.base[(u64)y * fb.stride_px + x] = on ? fg : bg;
-                }
-            }
-        }
-    }
-}
-
 /*
  * Разбор UTF-8 для строки.
  *
@@ -671,28 +643,59 @@ static u32 utf8_next(const char **s)
         *s = (const char *)p;
         return cp;
     }
+
+    /* Три байта: тире, кавычки-ёлочки, знак номера — они за кириллицей */
+    if (b >= 0xE0 && b <= 0xEF && (p[0] & 0xC0) == 0x80 &&
+        (p[1] & 0xC0) == 0x80) {
+        u32 cp = ((b & 0x0F) << 12) | ((u32)(p[0] & 0x3F) << 6) | (p[1] & 0x3F);
+
+        p += 2;
+        *s = (const char *)p;
+        return cp;
+    }
     *s = (const char *)p;
     return b;
 }
 
+/*
+ * Ширина строки.
+ *
+ * Складываем, а не умножаем: шрифт пропорциональный, у «ш» и «i» ширина
+ * разная. Привычка считать ширину умножением осталась от клеточного 8x8
+ * и теперь врёт — а по ширине строку центруют и подгоняют под кнопку.
+ */
 u32 fb_text_width(u32 scale, const char *s)
 {
+    const struct font_face *f;
     u32 n = 0;
 
     if (!s || !scale)
         return 0;
-    while (*s) {
-        utf8_next(&s);
-        n++;
+
+    f = font_pick(scale * 8);
+    if (!f) {
+        while (*s) {
+            utf8_next(&s);
+            n++;
+        }
+        return n * 8 * scale;
     }
-    return n * 8 * scale;
+
+    while (*s) {
+        u32 cp = utf8_next(&s);
+        struct font_glyph g;
+
+        n += (font_glyph(f, cp, &g) == 0) ? g.adv : f->px / 2;
+    }
+
+    return n;
 }
 
 /*
  * Тот же знак, но в произвольный буфер.
  *
- * Отдельная функция, а не общий код с draw_glyph_ex: та знает про кадр,
- * его ширину и его шаг строки, и обвешивать её проверками «а если буфер
+ * Отдельная функция, а не общий код с консолью: та знает про кадр, его
+ * ширину и его шаг строки, и обвешивать её проверками «а если буфер
  * чужой» значило бы усложнить самый горячий путь вывода ради редкого.
  */
 static void glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
@@ -726,22 +729,109 @@ static void glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
     }
 }
 
+/*
+ * Смешать цвет буквы с тем, что под ней.
+ *
+ * Сглаженный шрифт — это не «есть пиксель / нет пикселя», а мера
+ * покрытия: край буквы закрывает половину пикселя, и цвет там должен
+ * быть посередине между буквой и фоном. Без смешивания сглаживание
+ * превращается в грязную кайму, и лучше уж тогда старый 8x8.
+ */
+static inline u32 blend(u32 dst, u32 fg, u32 a)
+{
+    u32 r, g, b;
+
+    if (a >= 255)
+        return fg;
+
+    r = (((fg >> 16) & 0xFF) * a + ((dst >> 16) & 0xFF) * (255 - a)) / 255;
+    g = (((fg >> 8) & 0xFF) * a + ((dst >> 8) & 0xFF) * (255 - a)) / 255;
+    b = ((fg & 0xFF) * a + (dst & 0xFF) * (255 - a)) / 255;
+
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+static void font_glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
+                              const struct font_glyph *g,
+                              int px, int py, u32 fg)
+{
+    if (!g->bits)
+        return;                 /* пробел и прочие пустые знаки */
+
+    for (u32 row = 0; row < g->h; row++) {
+        int y = py + (int)row;
+
+        if (y < 0)
+            continue;
+        if ((u32)y >= bh)
+            break;
+
+        for (u32 col = 0; col < g->w; col++) {
+            int x = px + (int)col;
+            u32 a = g->bits[(u64)row * g->w + col];
+            u32 *dst;
+
+            if (!a || x < 0)
+                continue;
+            if ((u32)x >= bw)
+                break;
+            dst = &buf[(u64)y * pitch_px + (u32)x];
+            *dst = blend(*dst, fg, a);
+        }
+    }
+}
+
 void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
                 u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
+    const struct font_face *f;
     int opaque_bg = (bg >> 24) != 0;
 
     if (!buf || !s || !scale)
         return;
 
+    f = font_pick(scale * 8);
+    if (!f) {                   /* шрифт не разобрался — остаёмся на 8x8 */
+        while (*s) {
+            u32 cp = utf8_next(&s);
+
+            if (x + 8 * scale > bw)
+                break;
+            glyph_to_buf(buf, pitch_px, bw, bh, cp, x, y, scale, fg, bg,
+                         opaque_bg);
+            x += 8 * scale;
+        }
+        return;
+    }
+
+    /*
+     * Непрозрачный фон кладём полосой на всю строку заранее, а не под
+     * каждой буквой: у пропорционального шрифта буквы соприкасаются, и
+     * закрашивание по знакам съедало бы края соседей. Заодно это то
+     * самое «один проход», от которого не мигает меняющийся текст.
+     */
+    if (opaque_bg) {
+        u32 wpx = fb_text_width(scale, s);
+
+        for (u32 row = 0; row < f->line && y + row < bh; row++)
+            for (u32 col = 0; col < wpx && x + col < bw; col++)
+                buf[(u64)(y + row) * pitch_px + x + col] = bg;
+    }
+
     while (*s) {
         u32 cp = utf8_next(&s);
+        struct font_glyph g;
 
-        if (x + 8 * scale > bw)
+        if (font_glyph(f, cp, &g) != 0) {
+            x += f->px / 2;     /* знака нет — оставляем пустое место */
+            continue;
+        }
+        if (x + g.adv > bw)
             break;
-        glyph_to_buf(buf, pitch_px, bw, bh, cp, x, y, scale, fg, bg,
-                     opaque_bg);
-        x += 8 * scale;
+
+        font_glyph_to_buf(buf, pitch_px, bw, bh, &g,
+                          (int)x + g.left, (int)(y + f->base) + g.top, fg);
+        x += g.adv;
     }
 }
 
@@ -762,18 +852,11 @@ void fb_panic_text(u32 line, const char *s)
 
 void fb_text(u32 x, u32 y, u32 scale, u32 fg, u32 bg, const char *s)
 {
-    int opaque_bg = (bg >> 24) != 0;
-
     if (!fb.ready || !s || !scale)
         return;
-    while (*s) {
-        u32 cp = utf8_next(&s);
 
-        if (x + 8 * scale > fb.width)
-            break;
-        draw_glyph_ex(cp, x, y, scale, fg, bg, opaque_bg);
-        x += 8 * scale;
-    }
+    fb_text_to((u32 *)fb.base, fb.stride_px, fb.width, fb.height,
+               x, y, scale, fg, bg, s);
 }
 
 /*

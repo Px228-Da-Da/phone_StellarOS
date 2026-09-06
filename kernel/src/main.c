@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "print.h"
 #include "fb.h"
+#include "font.h"
 #include "mmu.h"
 #include "gic.h"
 #include "timer.h"
@@ -1117,6 +1118,14 @@ void kmain(u64 dtb_phys)
 
     HALT_STAGE(3);                          /* MMU и кэши живы */
     fast = bench_memfill();
+
+    /*
+     * Шрифт разбираем до первой буквы на экране. Не разобрался — вывод
+     * останется на старом 8x8: экран без текста хуже, чем экран с
+     * некрасивым текстом, а на этом этапе он ещё и единственный канал
+     * связи.
+     */
+    font_init(font_blob_start, (u32)(font_blob_end - font_blob_start));
 
     if (fb_init() == 0) {
         u64 base; u32 w, h, stride;
