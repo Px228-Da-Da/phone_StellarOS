@@ -295,10 +295,10 @@ void splash_task(void *arg)
      */
     if (buffered) {
         paint_all();
-        ui_status_draw();
+        ui_status_repaint();
         fb_flip();              /* показать готовый кадр */
         paint_all();
-        ui_status_draw();       /* и второй буфер такой же */
+        ui_status_repaint();       /* и второй буфер такой же */
         fb_double_buffer(0);
     }
 
@@ -319,7 +319,7 @@ void splash_task(void *arg)
      */
     if (!buffered) {
         paint_all();
-        ui_status_draw();
+        ui_status_repaint();
     }
     window_redraw_copies();
     gone = 1;

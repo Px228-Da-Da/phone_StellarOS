@@ -62,6 +62,40 @@ static u32 num(char *dst, u64 v)
     return i;
 }
 
+/* Дополнить строку пробелами до постоянной ширины */
+static void pad(char *s, u32 width)
+{
+    u32 n = 0;
+
+    while (s[n])
+        n++;
+    while (n < width)
+        s[n++] = ' ';
+    s[n] = 0;
+}
+
+/*
+ * Полосы уже нарисованы: дальше меняется только текст.
+ *
+ * Это и есть лечение мигания. Раньше каждое обновление начиналось с
+ * закраски полосы целиком, а потом по ней писался текст — и между этими
+ * двумя действиями контроллер дисплея успевал показать пустую полосу.
+ * Раз в секунду, на самом виду. Ровно та же болезнь, что когда-то была в
+ * оболочке, и лечится она так же: каждый пиксель меняется ровно один
+ * раз, а не дважды.
+ *
+ * Поэтому фон под полосами кладётся однажды, а часы и заряд пишутся с
+ * непрозрачным фоном и дополняются пробелами до постоянной ширины: новая
+ * надпись закрывает старую тем же проходом, которым рисует себя.
+ */
+static int bars_painted;
+
+void ui_status_repaint(void)
+{
+    bars_painted = 0;
+    ui_status_draw();
+}
+
 void ui_status_draw(void)
 {
     u64 base;
@@ -78,8 +112,16 @@ void ui_status_draw(void)
     if (sh <= UI_STATUS_H + UI_HOME_H)
         return;
 
-    /* --- полоса состояния --- */
-    fb_fill_rect(0, 0, sw, UI_STATUS_H, COL_BAR);
+    if (!bars_painted) {
+        u32 bar_w = sw / 3;
+        u32 bar_x = (sw - bar_w) / 2;
+        u32 bar_y = sh - UI_HOME_H / 2 - 3;
+
+        fb_fill_rect(0, 0, sw, UI_STATUS_H, COL_BAR);
+        fb_fill_rect(0, sh - UI_HOME_H, sw, UI_HOME_H, COL_BAR);
+        fb_fill_rect(bar_x, bar_y, bar_w, 6, COL_HOME);
+        bars_painted = 1;
+    }
 
     /*
      * Часы слева, но не под вырезом камеры: у merlin он в левом верхнем
@@ -94,9 +136,10 @@ void ui_status_draw(void)
         line[n++] = '0';
     n += num(line + n, sec % 60);
     line[n] = 0;
+    pad(line, 8);
     fb_text(220, 26, 2, COL_TEXT, COL_BAR, line);
 
-    /* --- заряд справа --- */
+    /* --- заряд --- */
     battery_last(&bat);
     n = 0;
     if (bat.valid) {
@@ -126,23 +169,18 @@ void ui_status_draw(void)
             line[n++] = *q++;
         line[n] = 0;
     }
-    {
-        u32 w = fb_text_width(2, line);
 
-        fb_text(sw > w + 32 ? sw - w - 32 : 0, 26, 2,
-                bat.valid && bat.percent < 15 ? 0xFFFF6B6B : COL_TEXT,
-                COL_BAR, line);
-    }
-
-    /* --- полоска «домой» --- */
-    {
-        u32 bar_w = sw / 3;
-        u32 bar_x = (sw - bar_w) / 2;
-        u32 bar_y = sh - UI_HOME_H / 2 - 3;
-
-        fb_fill_rect(0, sh - UI_HOME_H, sw, UI_HOME_H, COL_BAR);
-        fb_fill_rect(bar_x, bar_y, bar_w, 6, COL_HOME);
-    }
+    /*
+     * Пишем от постоянного места, а не от правого края.
+     *
+     * Правое выравнивание пришлось бы двигать вслед за длиной надписи, и
+     * хвост прежней оставался бы на экране — либо его пришлось бы
+     * стирать отдельным проходом, то есть мигать.
+     */
+    pad(line, 16);
+    fb_text(sw > 480 ? sw - 480 : 0, 26, 2,
+            bat.valid && bat.percent < 15 ? 0xFFFF6B6B : COL_TEXT,
+            COL_BAR, line);
 
     (void)COL_DIM;
 }
