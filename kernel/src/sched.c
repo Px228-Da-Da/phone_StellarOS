@@ -47,6 +47,10 @@ struct task {
 extern void ctx_switch(u64 *save_sp, u64 new_sp);
 extern void task_start(void);
 
+/* Сколько задач показывает диагностика за раз. Больше не бывает, а
+ * снимок лежит на стеке — расти ему незачем. */
+#define SCHED_DUMP_MAX  48
+
 static struct spinlock rq_lock = SPINLOCK_INIT("runqueue");
 static struct task *rq_head;
 static struct task *rq_tail;
@@ -744,20 +748,52 @@ void sched_dump(void)
     static const char *state_name[] = {
         "ГОТОВА", "БЕЖИТ", "СПИТ", "ЖДЁТ", "КОНЕЦ"
     };
+    /*
+     * Сначала снимок под замком, печать — после.
+     *
+     * Печатать прямо в обходе списка нельзя, хотя так короче. Замок
+     * очереди задач — самый горячий в системе: его берёт каждый тик
+     * таймера на каждом ядре, каждое пробуждение и каждый выход задачи.
+     * Печать шестнадцати строк уходит в кольцо консоли, а это ещё один
+     * замок и десятки микросекунд — и всё это время остальные семь ядер
+     * стоят на входе в планировщик с закрытыми прерываниями.
+     *
+     * Дальше по этому пути начинается настоящая беда: стоит печати
+     * когда-нибудь понадобиться планировщик (уснуть, разбудить ждущего),
+     * и мы получим взаимную блокировку, из которой не выйти — с
+     * закрытыми прерываниями некому даже сообщить о ней.
+     *
+     * Снимок стоит килобайт стека и снимает вопрос целиком.
+     */
+    struct row {
+        const char *name;
+        u64 id, cpu, slices;
+        u32 state;
+    } rows[SCHED_DUMP_MAX];
+    u32 n = 0;
     u64 flags = spin_lock_irq(&rq_lock);
 
     /* idle-задачи пропускаем: их ровно по одной на ядро, они никогда
      * не попадают в очередь, и в списке из них получается стена строк,
      * за которой не видно настоящих задач. */
-    for (struct task *t = all_head; t; t = t->all_next) {
+    for (struct task *t = all_head; t && n < SCHED_DUMP_MAX; t = t->all_next) {
         if (t->stack == NULL)
             continue;
 
-        kprintf("  %s ID %lu %s ЯДРО %lu КВАНТОВ %lu\n",
-                t->name, t->id,
-                t->state < ARRAY_SIZE(state_name) ? state_name[t->state] : "?",
-                t->last_cpu, t->slices);
+        rows[n].name = t->name;
+        rows[n].id = t->id;
+        rows[n].state = t->state;
+        rows[n].cpu = t->last_cpu;
+        rows[n].slices = t->slices;
+        n++;
     }
 
     spin_unlock_irq(&rq_lock, flags);
+
+    for (u32 i = 0; i < n; i++)
+        kprintf("  %s ID %lu %s ЯДРО %lu КВАНТОВ %lu\n",
+                rows[i].name, rows[i].id,
+                rows[i].state < ARRAY_SIZE(state_name)
+                        ? state_name[rows[i].state] : "?",
+                rows[i].cpu, rows[i].slices);
 }
