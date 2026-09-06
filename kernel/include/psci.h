@@ -39,6 +39,14 @@ s64 psci_version(void);
  */
 void machine_reset(void);
 
+/*
+ * Выключить телефон.
+ *
+ * Возвращается ТОЛЬКО при неудаче — с кодом PSCI. Удачное выключение
+ * не возвращается никуда.
+ */
+s64 machine_power_off(void);
+
 /* Запустить ядро. mpidr — как в MPIDR_EL1, entry — физический адрес входа,
  * context_id придёт в x0 запущенному ядру. */
 s64 psci_cpu_on(u64 mpidr, u64 entry, u64 context_id);

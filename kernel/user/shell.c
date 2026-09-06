@@ -87,6 +87,10 @@
 #define COL_BTN_ARM 0xFF7A1F2E
 #define COL_BTN_EDGE 0xFF5E2130
 #define COL_BTN_TEXT 0xFFFF9AA8
+#define COL_OFF      0xFF15203A      /* выключение: спокойный синий  */
+#define COL_OFF_ARM  0xFF2E4A86
+#define COL_OFF_EDGE 0xFF32476E
+#define COL_OFF_TEXT 0xFF9FC4FF
 
 static u32 *win;                    /* первая половина буфера    */
 static u32 *back;                   /* та, в которую рисуем      */
@@ -127,8 +131,20 @@ static u64 draw_sum;
 static u32 frame_count;
 static u64 frame_told;
 
-/* Кнопка перезагрузки */
-static int reboot_armed;
+/*
+ * Кнопки питания.
+ *
+ * Их две, и обе опасные, поэтому взведена может быть только одна:
+ * первое нажатие взводит, второе выполняет. Нажатие мимо или четыре
+ * секунды тишины взвод снимают — иначе случайное касание через час
+ * выключило бы телефон.
+ */
+#define BTN_REBOOT  0
+#define BTN_OFF     1
+#define BTN_COUNT   2
+
+static int armed;                   /* какая кнопка взведена, -1 — ни одна */
+static int off_failed;              /* прошивка не умеет выключать        */
 static u64 armed_at;
 static u64 last_seen_ms;     /* когда последний раз слышали палец */
 static u64 app_task;         /* запущенное приложение; 0 — не запускали */
@@ -187,20 +203,30 @@ static int tile_at(u32 px, u32 py)
     return -1;
 }
 
-static void btn_rect(u32 *x, u32 *y, u32 *w, u32 *h)
+/* Две кнопки делят ширину плитки поровну, с зазором посередине */
+#define BTN_GAP     16
+
+static void btn_rect(int which, u32 *x, u32 *y, u32 *w, u32 *h)
 {
-    *x = MARGIN;
+    u32 bw = (tile_w > BTN_GAP) ? (tile_w - BTN_GAP) / 2 : tile_w;
+
     *h = BTN_H;
     *y = (sh > BTN_H + MARGIN) ? sh - BTN_H - MARGIN : HEADER_H;
-    *w = tile_w;
+    *w = bw;
+    *x = MARGIN + (which == BTN_OFF ? bw + BTN_GAP : 0);
 }
 
-static int in_button(u32 px, u32 py)
+/* Какая кнопка под точкой; -1 — ни одной */
+static int btn_at(u32 px, u32 py)
 {
-    u32 x, y, w, h;
+    for (int i = 0; i < BTN_COUNT; i++) {
+        u32 x, y, w, h;
 
-    btn_rect(&x, &y, &w, &h);
-    return px >= x && px < x + w && py >= y && py < y + h;
+        btn_rect(i, &x, &y, &w, &h);
+        if (px >= x && px < x + w && py >= y && py < y + h)
+            return i;
+    }
+    return -1;
 }
 
 /* --- Рисование ------------------------------------------------------ */
@@ -328,16 +354,43 @@ static void copy_str(char *dst, const char *src, u32 max)
 
 static void draw_button(void)
 {
-    u32 x, y, w, h;
-    u32 body = reboot_armed ? COL_BTN_ARM : COL_BTN;
+    for (int i = 0; i < BTN_COUNT; i++) {
+        u32 x, y, w, h;
+        int hot = (armed == i);
+        u32 body, edge, fg;
+        const char *note;
 
-    btn_rect(&x, &y, &w, &h);
-    urect(back, sw, x, y, w, h, body);
-    uframe(back, sw, x, y, w, h, 2, COL_BTN_EDGE);
-    text(x + 20, y + 22, 3, reboot_armed ? COL_WHITE : COL_BTN_TEXT, body,
-         "ПЕРЕЗАГРУЗКА");
-    text(x + 20, y + 66, 2, reboot_armed ? COL_WHITE : COL_DIM, body,
-         reboot_armed ? "НАЖМИ ЕЩЁ РАЗ" : "НАЖАТЬ ДВАЖДЫ");
+        btn_rect(i, &x, &y, &w, &h);
+
+        if (i == BTN_REBOOT) {
+            body = hot ? COL_BTN_ARM : COL_BTN;
+            edge = COL_BTN_EDGE;
+            fg   = hot ? COL_WHITE : COL_BTN_TEXT;
+        } else {
+            body = hot ? COL_OFF_ARM : COL_OFF;
+            edge = COL_OFF_EDGE;
+            fg   = hot ? COL_WHITE : COL_OFF_TEXT;
+        }
+
+        /*
+         * Нижняя строка говорит ровно то, что происходит сейчас: взведена
+         * ли кнопка, а у выключения — не отказала ли прошивка. Молчать о
+         * таком отказе нельзя: человек нажал, экран не погас, и без
+         * надписи он вправе решить, что сломалась кнопка.
+         */
+        if (hot)
+            note = "НАЖМИ ЕЩЁ РАЗ";
+        else if (i == BTN_OFF && off_failed)
+            note = "НЕ УМЕЕТ ПРОШИВКА";
+        else
+            note = "НАЖАТЬ ДВАЖДЫ";
+
+        urect(back, sw, x, y, w, h, body);
+        uframe(back, sw, x, y, w, h, 2, edge);
+        text(x + 20, y + 22, 3, fg, body,
+             i == BTN_REBOOT ? "ПЕРЕЗАГРУЗКА" : "ВЫКЛЮЧИТЬ");
+        text(x + 20, y + 66, 2, hot ? COL_WHITE : COL_DIM, body, note);
+    }
 }
 
 /*
@@ -699,18 +752,31 @@ static void on_down(const struct touch *t)
     stopped_fling = scroll_busy();
     fling = 0;
 
-    if (in_button(t->x, t->y)) {
-        if (reboot_armed) {
-            write("EL0      : ОБОЛОЧКА: ПЕРЕЗАГРУЗКА ПО КНОПКЕ\n");
-            reboot();
+    {
+        int b = btn_at(t->x, t->y);
+
+        if (b >= 0) {
+            if (armed == b && b == BTN_REBOOT) {
+                write("EL0      : ОБОЛОЧКА: ПЕРЕЗАГРУЗКА ПО КНОПКЕ\n");
+                reboot();
+            }
+            if (armed == b && b == BTN_OFF) {
+                write("EL0      : ОБОЛОЧКА: ВЫКЛЮЧЕНИЕ ПО КНОПКЕ\n");
+                /* Возвращается только при неудаче — значит не вышло */
+                power_off();
+                off_failed = 1;
+                armed = -1;
+                return;
+            }
+            armed = b;
+            off_failed = 0;
+            armed_at = uptime_ms();
+            return;
         }
-        reboot_armed = 1;
-        armed_at = uptime_ms();
-        return;
     }
 
-    if (reboot_armed)           /* нажали мимо — отменяем */
-        reboot_armed = 0;
+    if (armed >= 0)             /* нажали мимо — снимаем взвод */
+        armed = -1;
 
     touching = 1;
     dragging = 0;
@@ -803,6 +869,7 @@ void _start(void)
 
     pressed = -1;
     chosen = -1;
+    armed = -1;         /* у программы в EL0 не бывает начальных значений */
 
     screen_size(&sw, &sh);
     if (!sw || !sh) {
@@ -900,8 +967,8 @@ void _start(void)
 
         /* Взведённая кнопка гаснет сама: иначе случайное касание через
          * час перезагрузило бы телефон. */
-        if (reboot_armed && uptime_ms() - armed_at > BTN_ARM_MS) {
-            reboot_armed = 0;
+        if (armed >= 0 && uptime_ms() - armed_at > BTN_ARM_MS) {
+            armed = -1;
             redraw = 1;
         }
 
