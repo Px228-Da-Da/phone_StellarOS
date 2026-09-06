@@ -97,6 +97,9 @@ int  window_close(void);
  */
 void window_task_gone(u64 task, u64 ttbr0);
 
+/* Заново показать окна, которые идут копией: после заливки всего кадра */
+void window_redraw_copies(void);
+
 /* Кому адресовано касание в точке: задача-хозяйка верхнего окна, 0 — никому */
 u64 window_owner_at(u32 x, u32 y);
 

@@ -13,6 +13,7 @@
  * «программа упадёт», а «упадёт система» — с полными правами.
  */
 #include "syscall.h"
+#include "psci.h"
 #include "sched.h"
 #include "timer.h"
 #include "print.h"
@@ -280,6 +281,19 @@ static void syscall(struct trapframe *f)
 
     case SYS_FLIP:
         f->x[0] = (u64)(s64)window_flip((u32)f->x[0]);
+        return;
+
+    /*
+     * Перезагрузка по просьбе программы.
+     *
+     * Права спросить об этом есть у любой программы, и это осознанно:
+     * разделения на своих и чужих у нас пока нет вовсе, а притворяться,
+     * что оно есть, хуже, чем его не иметь. Когда появится — этот вызов
+     * станет одним из первых, кого начнут спрашивать «а тебе можно».
+     */
+    case SYS_REBOOT:
+        kprintf("EL0      : %s ПРОСИТ ПЕРЕЗАГРУЗКУ\n", task_name());
+        machine_reset();
         return;
 
     case SYS_CLOSE:

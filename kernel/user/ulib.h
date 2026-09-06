@@ -97,6 +97,20 @@ static inline s64 flip(u32 half)
     return sys(SYS_FLIP, half, 0, 0, 0, 0, 0);
 }
 
+/*
+ * Перезагрузить телефон. Не возвращается.
+ *
+ * Спросить об этом может любая программа: разделения на своих и чужих у
+ * системы пока нет, и притворяться, что оно есть, было бы хуже, чем
+ * честно его не иметь.
+ */
+static inline void reboot(void)
+{
+    sys(SYS_REBOOT, 0, 0, 0, 0, 0, 0);
+    for (;;)
+        ;
+}
+
 static inline s64 window_close(void)
 {
     return sys(SYS_CLOSE, 0, 0, 0, 0, 0, 0);

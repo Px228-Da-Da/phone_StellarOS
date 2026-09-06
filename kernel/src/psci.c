@@ -6,10 +6,17 @@
  * и возвращает управление следующей за smc инструкцией.
  */
 #include "psci.h"
+#include "print.h"
+#include "usb.h"
+#include "io.h"
+#if defined(BOARD_MERLIN)
+#include "soc/mt6768.h"
+#endif
 
 /* Идентификаторы функций. Префикс 0x84 — 32-битный вызов,
  * 0xC4 — 64-битный (аргументы шире 32 бит, как MPIDR и адрес входа). */
 #define PSCI_FN_VERSION         0x84000000UL
+#define PSCI_FN_SYSTEM_RESET    0x84000009UL
 #define PSCI_FN_CPU_ON_64       0xC4000003UL
 #define PSCI_FN_AFFINITY_INFO64 0xC4000004UL
 
@@ -80,4 +87,28 @@ s64 psci_affinity_info(u64 mpidr)
 {
     /* Последний аргумент — уровень аффинити; 0 означает «конкретное ядро» */
     return psci_call(PSCI_FN_AFFINITY_INFO64, mpidr, 0, 0);
+}
+
+/*
+ * Перезагрузка.
+ *
+ * Порядок попыток — от общего к частному: PSCI работает и на телефоне, и
+ * в эмуляторе, а сторожевой таймер только на merlin, зато не спрашивая
+ * ни у кого разрешения.
+ */
+void machine_reset(void)
+{
+    kprintf("СБРОС    : ПЕРЕЗАГРУЖАЮ ТЕЛЕФОН\n");
+    usb_flush();
+
+    psci_call(PSCI_FN_SYSTEM_RESET, 0, 0, 0);
+
+#if defined(BOARD_MERLIN)
+    /* Прошивка отказала — бьём по сторожевому таймеру */
+    mmio_write32(MT_TOPRGU_BASE + WDT_SWRST, WDT_SWRST_KEY);
+    dsb();
+#endif
+
+    for (;;)
+        wfi();
 }

@@ -25,6 +25,8 @@
 #define TITLE_H     150
 #define TILE_H      170
 #define STATUS_H    60
+#define BTN_H       110         /* кнопка перезагрузки под плитками */
+#define BTN_ARM_MS  4000        /* сколько кнопка ждёт подтверждения */
 
 #define COL_BG      0xFF0B1020      /* фон                       */
 #define COL_TILE    0xFF16203A      /* плитка                    */
@@ -33,6 +35,10 @@
 #define COL_TEXT    0xFF7FD4FF      /* подписи                   */
 #define COL_DIM     0xFF5A6A88      /* второстепенное            */
 #define COL_WHITE   0xFFFFFFFF
+#define COL_BTN     0xFF2A1119      /* кнопка в покое            */
+#define COL_BTN_ARM 0xFF7A1F2E      /* кнопка ждёт подтверждения */
+#define COL_BTN_EDGE 0xFF5E2130
+#define COL_BTN_TEXT 0xFFFF9AA8
 
 static u32 *win;                    /* первая половина буфера    */
 static u32 *back;                   /* та, в которую рисуем      */
@@ -45,6 +51,8 @@ static u32 tile_w;
 static int pressed;                 /* какая плитка нажата       */
 static int chosen;                  /* какая выбрана             */
 static u64 touches;
+static int reboot_armed;        /* кнопка ждёт второго нажатия */
+static u64 armed_at;
 static char line[96];
 
 /* Что уже показано в строке состояния: перерисовываем только на разницу */
@@ -100,6 +108,52 @@ static void draw_tile(u32 i)
 }
 
 /*
+ * Кнопка перезагрузки — под левым столбцом плиток.
+ *
+ * Нажимается дважды: первое нажатие только предупреждает, второе
+ * перезагружает. Не перестраховка: кнопка живёт на том же экране, что и
+ * плитки, палец попадает по ней случайно, а перезагрузка — единственное
+ * действие в оболочке, которое нельзя отменить.
+ */
+static void btn_rect(u32 *x, u32 *y, u32 *w, u32 *h)
+{
+    /*
+     * Внизу экрана, а не сразу под плитками.
+     *
+     * Середину занимает окно приложения — оно лежит поверх оболочки
+     * своим слоем, и кнопка под ним была бы видна на десяток пикселей.
+     * Место для кнопки надо выбирать по тому, что на экране, а не по
+     * тому, что в раскладке.
+     */
+    *x = MARGIN;
+    *h = BTN_H;
+    *y = (sh > BTN_H + MARGIN) ? sh - BTN_H - MARGIN : TITLE_H;
+    *w = tile_w;
+}
+
+static int in_button(u32 px, u32 py)
+{
+    u32 x, y, w, h;
+
+    btn_rect(&x, &y, &w, &h);
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+static void draw_button(void)
+{
+    u32 x, y, w, h;
+    u32 body = reboot_armed ? COL_BTN_ARM : COL_BTN;
+
+    btn_rect(&x, &y, &w, &h);
+    urect(back, sw, x, y, w, h, body);
+    uframe(back, sw, x, y, w, h, 2, COL_BTN_EDGE);
+    text(x + 20, y + 22, 3, reboot_armed ? COL_WHITE : COL_BTN_TEXT, body,
+         "ПЕРЕЗАГРУЗКА");
+    text(x + 20, y + 66, 2, reboot_armed ? COL_WHITE : COL_DIM, body,
+         reboot_armed ? "НАЖМИ ЕЩЁ РАЗ" : "НАЖАТЬ ДВАЖДЫ");
+}
+
+/*
  * Строка внизу: что выбрано и сколько было касаний.
  *
  * Ни одного стирания. Раньше здесь сначала закрашивался прямоугольник, а
@@ -126,7 +180,12 @@ static void copy_str(char *dst, const char *src, u32 max)
 
 static void draw_status(void)
 {
-    u32 y = TITLE_H + 3 * (TILE_H + GAP) + 20;
+    u32 bx, by, bw, bh;
+    u32 y;
+
+    btn_rect(&bx, &by, &bw, &bh);
+    /* Над кнопкой: две строки состояния и подпись выбранной плитки */
+    y = (by > 110) ? by - 110 : TITLE_H;
 
     copy_str(line, chosen >= 0 ? tile_note[chosen] : "НАЖМИ НА ПЛИТКУ",
              sizeof(line));
@@ -172,6 +231,7 @@ static void draw_all(void)
 
     for (u32 i = 0; i < TILE_COUNT; i++)
         draw_tile(i);
+    draw_button();
     draw_status();
 }
 
@@ -239,8 +299,34 @@ void _start(void)
         if (input(&t) != 1)
             continue;
 
+        /* Предупреждение живёт недолго: молча оставленная взведённой
+         * кнопка перезагрузила бы телефон случайным касанием через час */
+        if (reboot_armed && uptime_ms() - armed_at > BTN_ARM_MS) {
+            reboot_armed = 0;
+            draw_all();
+            show();
+        }
+
+        if (t.action == TOUCH_DOWN && in_button(t.x, t.y)) {
+            touches++;
+            if (reboot_armed) {
+                write("EL0      : ОБОЛОЧКА: ПЕРЕЗАГРУЗКА ПО КНОПКЕ\n");
+                reboot();
+            }
+            reboot_armed = 1;
+            armed_at = uptime_ms();
+            draw_all();
+            show();
+            continue;
+        }
+
         if (t.action == TOUCH_DOWN) {
             touches++;
+            if (reboot_armed) {     /* нажали мимо — отменяем */
+                reboot_armed = 0;
+                draw_all();
+                show();
+            }
             pressed = tile_at(t.x, t.y);
             if (pressed >= 0) {
                 draw_all();
