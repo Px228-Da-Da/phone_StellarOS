@@ -144,7 +144,7 @@ static u64 frame_told;
 #define BTN_COUNT   2
 
 static int armed;                   /* какая кнопка взведена, -1 — ни одна */
-static int off_failed;              /* прошивка не умеет выключать        */
+static int off_rc;                  /* чем кончилась попытка выключить    */
 static u64 armed_at;
 static u64 last_seen_ms;     /* когда последний раз слышали палец */
 static u64 app_task;         /* запущенное приложение; 0 — не запускали */
@@ -380,8 +380,10 @@ static void draw_button(void)
          */
         if (hot)
             note = "НАЖМИ ЕЩЁ РАЗ";
-        else if (i == BTN_OFF && off_failed)
-            note = "НЕ УМЕЕТ ПРОШИВКА";
+        else if (i == BTN_OFF && off_rc == -3)
+            note = "СНАЧАЛА ОТКЛЮЧИ КАБЕЛЬ";
+        else if (i == BTN_OFF && off_rc)
+            note = "НЕ ВЫКЛЮЧИЛОСЬ";
         else
             note = "НАЖАТЬ ДВАЖДЫ";
 
@@ -762,14 +764,21 @@ static void on_down(const struct touch *t)
             }
             if (armed == b && b == BTN_OFF) {
                 write("EL0      : ОБОЛОЧКА: ВЫКЛЮЧЕНИЕ ПО КНОПКЕ\n");
-                /* Возвращается только при неудаче — значит не вышло */
-                power_off();
-                off_failed = 1;
+                /*
+                 * Возвращается только при неудаче, и код говорит, какой
+                 * именно: -3 значит «мешает кабель». Показать причину
+                 * важнее, чем показать сам факт отказа: с кабелем
+                 * человек может что-то сделать, с общим «не вышло» —
+                 * ничего.
+                 */
+                off_rc = (int)power_off();
+                if (!off_rc)
+                    off_rc = -1;
                 armed = -1;
                 return;
             }
             armed = b;
-            off_failed = 0;
+            off_rc = 0;
             armed_at = uptime_ms();
             return;
         }
