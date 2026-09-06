@@ -178,20 +178,49 @@ static int user_can_write(u64 va)
  * взяв оба замка сразу, — но это уже порядок взятия двух замков, то есть
  * разговор о взаимных блокировках ради выигрыша, которого не видно.
  */
-static s64 sys_input(u64 uva)
+/*
+ * Ждать касание.
+ *
+ * wait_ms — сколько ждать: 0 значит «сколько понадобится». Ограничение
+ * появилось ради движения: пока идёт прокрутка по инерции, пальца на
+ * экране уже нет, а рисовать надо шестьдесят раз в секунду. Без срока
+ * программа спала бы в ожидании события, которого не будет, и всякое
+ * движение после отпускания пальца стало бы невозможным.
+ *
+ * Возвращает 1 — событие в буфере, 0 — время вышло, -1 — адрес не наш.
+ */
+static s64 sys_input(u64 uva, u64 wait_ms)
 {
     struct input_event e;
+    u64 deadline = wait_ms ? timer_uptime_ms() + wait_ms : 0;
 
     if (!user_can_write(uva) || !user_can_write(uva + TOUCH_EVENT_BYTES - 1))
         return -1;
 
     for (;;) {
+        u64 left = 60;
+
         if (input_pop_task(task_id(), &e)) {
             memcpy((void *)(uintptr_t)uva, &e, TOUCH_EVENT_BYTES);
             return 1;
         }
 
-        sched_wait_timeout(INPUT_CHAN, 60);
+        if (deadline) {
+            u64 now = timer_uptime_ms();
+
+            if (now >= deadline)
+                return 0;
+            left = deadline - now;
+            if (left > 60)
+                left = 60;
+        }
+
+        /*
+         * Спим не дольше шестидесяти миллисекунд за раз даже когда ждём
+         * вечно: пробуждение по событию есть, но полагаться только на
+         * него значит поверить, что событие никогда не потеряется.
+         */
+        sched_wait_timeout(INPUT_CHAN, left);
     }
 }
 
@@ -310,7 +339,7 @@ static void syscall(struct trapframe *f)
     }
 
     case SYS_INPUT:
-        f->x[0] = (u64)sys_input(f->x[0]);
+        f->x[0] = (u64)sys_input(f->x[0], f->x[1]);
         return;
 
     case SYS_SPAWN:
