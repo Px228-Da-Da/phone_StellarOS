@@ -255,15 +255,38 @@ static void draw_tile(u32 i)
 static void draw_scrollbar(void)
 {
     u32 view = list_bottom - list_top;
+    int at = scroll;
     u32 h, y;
 
     if (scroll_max <= 0)
         return;
 
-    h = view * view / content_h;
+    /*
+     * Положение считаем по ЗАЖАТОЙ прокрутке.
+     *
+     * С резиновыми краями scroll выходит за границы — в том числе в
+     * минус, — а здесь он превращался в беззнаковое число: минус
+     * тридцать становился четырьмя миллиардами, ползунок уезжал за край
+     * буфера, и ядро снимало оболочку за запись в чужую память. Урок
+     * простой: если величина стала знаковой, надо пройти глазами все
+     * места, где она превращается в беззнаковую.
+     */
+    if (at < 0)
+        at = 0;
+    if (at > scroll_max)
+        at = scroll_max;
+
+    h = (u32)((u64)view * view / content_h);
     if (h < 40)
         h = 40;
-    y = list_top + (u32)((u64)(view - h) * (u32)scroll / (u32)scroll_max);
+    if (h > view)
+        h = view;
+
+    y = list_top + (u32)((u64)(view - h) * (u32)at / (u32)scroll_max);
+    if (y + h > sh)
+        h = (y < sh) ? sh - y : 0;
+    if (!h)
+        return;
 
     urect(back, sw, sw - 10, y, 4, h, COL_SCROLL);
 }

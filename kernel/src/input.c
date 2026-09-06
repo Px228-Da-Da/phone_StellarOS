@@ -73,7 +73,8 @@ static struct {
  * Нажатие и отпускание не заменяются никогда: их пропуск меняет смысл
  * происходящего, а не точность.
  */
-static void subs_push_locked(const struct input_event *e, u64 target)
+static void subs_push_locked(const struct input_event *e, u64 target,
+                             const u64 *windowed, u32 nwindowed)
 {
     for (u32 i = 0; i < SUB_MAX; i++) {
         u32 next;
@@ -81,11 +82,27 @@ static void subs_push_locked(const struct input_event *e, u64 target)
         if (!subs[i].owner)
             continue;
 
-        /* Касание достаётся тому, чьё окно под пальцем. 0 — окна там
-         * нет, и событие получают все: иначе программа без окна вообще
-         * не узнала бы о касаниях. */
-        if (target && subs[i].owner != target)
-            continue;
+        /*
+         * Касание достаётся тому, чьё окно под пальцем.
+         *
+         * Окна там нет — событие получают только те, у кого окна нет
+         * вовсе: им координаты экрана и нужны. Программе с окном чужая
+         * точка ни к чему: она разберёт её как свою и нажмёт не туда —
+         * ровно это и случилось, когда оболочка со своим окном во весь
+         * экран умерла, а приложение осталось одно.
+         */
+        if (target) {
+            if (subs[i].owner != target)
+                continue;
+        } else {
+            int has_window = 0;
+
+            for (u32 k = 0; k < nwindowed; k++)
+                if (windowed[k] == subs[i].owner)
+                    has_window = 1;
+            if (has_window)
+                continue;
+        }
 
         if (e->action == TOUCH_MOVE && subs[i].head != subs[i].tail) {
             u32 last = (subs[i].head - 1) & (SUB_RING - 1);
@@ -108,15 +125,25 @@ static void subs_push_locked(const struct input_event *e, u64 target)
 }
 
 /* Скольким очередям досталось событие. Под замком ввода. */
-static u32 subs_count_locked(u64 target)
+static u32 subs_count_locked(u64 target, const u64 *windowed, u32 nwindowed)
 {
     u32 n = 0;
 
     for (u32 i = 0; i < SUB_MAX; i++) {
         if (!subs[i].owner)
             continue;
-        if (target && subs[i].owner != target)
-            continue;
+        if (target) {
+            if (subs[i].owner != target)
+                continue;
+        } else {
+            int has_window = 0;
+
+            for (u32 k = 0; k < nwindowed; k++)
+                if (windowed[k] == subs[i].owner)
+                    has_window = 1;
+            if (has_window)
+                continue;
+        }
         n++;
     }
 
@@ -186,6 +213,8 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
     u64 target;
     u16 sub_x = x, sub_y = y;
     u32 delivered = 0;
+    u64 windowed[SUB_MAX];
+    u32 nwindowed = 0;
     struct input_event ev, sub_ev;
 
     /*
@@ -203,6 +232,10 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
         grabbed[id] = 0;
     else
         grabbed[id] = target;
+
+    /* Спрашиваем окна до замка ввода — порядок замков тот же, что выше */
+    if (!target)
+        nwindowed = window_owners(windowed, SUB_MAX);
 
     /*
      * Адресату отдаём точку в координатах ЕГО окна.
@@ -274,8 +307,8 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
     sub_ev = ev;
     sub_ev.x = sub_x;
     sub_ev.y = sub_y;
-    subs_push_locked(&sub_ev, target);
-    delivered = subs_count_locked(target);
+    subs_push_locked(&sub_ev, target, windowed, nwindowed);
+    delivered = subs_count_locked(target, windowed, nwindowed);
     spin_unlock_irq(&input_lock, flags);
 
     /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий
