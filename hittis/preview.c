@@ -401,10 +401,26 @@ static void http_pump(int wait_ms)
 static void h_print(const char *s)  { printf("%s", s); fflush(stdout); }
 static void h_printn(vm_i64 v)      { printf("%lld\n", v); fflush(stdout); }
 
+/*
+ * Сколько места «даёт» просмотр.
+ *
+ * Ровно столько же, сколько даст телефон: рабочая область merlin — экран
+ * 1080x2340 без полосы состояния и полоски «домой». Приложение, которое
+ * просит «сколько дадут», должно увидеть здесь то же самое, что увидит
+ * там, иначе проверка на компьютере перестаёт что-либо значить.
+ */
+#define AREA_W  1080
+#define AREA_H  2124
+
 static int h_window(int w, int h)
 {
     if (pix)
         return 1;               /* окно уже есть, второго не бывает */
+
+    if (w <= 0 || w > AREA_W)
+        w = AREA_W;
+    if (h <= 0 || h > AREA_H)
+        h = AREA_H;
 
     win_w = w;
     win_h = h;
