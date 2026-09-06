@@ -131,13 +131,24 @@ static u64 frame_told;
 static int reboot_armed;
 static u64 armed_at;
 static u64 last_seen_ms;     /* когда последний раз слышали палец */
+static u64 app_task;         /* запущенное приложение; 0 — не запускали */
+
+/*
+ * Первая плитка — не рассказ, а действие: она запускает приложение.
+ *
+ * Оболочка перестала быть витриной. Система загружается в рабочий стол,
+ * приложение открывается отсюда и занимает весь экран, а полоска «домой»
+ * переключает между ними — как и положено телефону.
+ */
+#define TILE_APP    0
 
 static const char *const tile_name[TILE_COUNT] = {
-    "ЭКРАН", "КАСАНИЯ", "ПАМЯТЬ", "ЯДРА", "ОКНА",
-    "О СИСТЕМЕ", "ПРОГРАММЫ", "ЯЗЫК", "ФЛЕШКА", "ШРИФТ",
+    "ПЛИТКИ", "ЭКРАН", "КАСАНИЯ", "ПАМЯТЬ", "ЯДРА",
+    "ОКНА", "О СИСТЕМЕ", "ПРОГРАММЫ", "ЯЗЫК", "ШРИФТ",
 };
 
 static const char *const tile_note[TILE_COUNT] = {
+    "ПРИЛОЖЕНИЕ НА HITTIS — НАЖМИ, ЧТОБЫ ЗАПУСТИТЬ",
     "СЛОИ ОВЕРЛЕЯ, КАДР ЧИТАЕТ КОНТРОЛЛЕР",
     "NOVATEK NT36672A, ОЧЕРЕДЬ У КАЖДОЙ ПРОГРАММЫ",
     "СВОИ ТАБЛИЦЫ У КАЖДОЙ ПРОГРАММЫ",
@@ -146,7 +157,6 @@ static const char *const tile_note[TILE_COUNT] = {
     "ОБОЛОЧКА РАБОТАЕТ В EL0, КАК ОБЫЧНАЯ ПРОГРАММА",
     "СВОЁ ПРОСТРАНСТВО, СВОЙ ASID, СНЯТИЕ ПРИ НАРУШЕНИИ",
     "HITTIS: .HT СОБИРАЕТСЯ В .SLT, МАШИНА В EL0",
-    "EMMC: РАЗДЕЛЫ ЧИТАЮТСЯ, ЗАПИСЕЙ НЕТ",
     "MANROPE, СВОЙ РАСТЕРИЗАТОР TRUETYPE",
 };
 
@@ -251,8 +261,13 @@ static void draw_tile(u32 i)
     if (y + 30 >= 0 && y + 30 < (int)sh - 24)
         text((u32)x + 24, (u32)(y + 30), 3,
              ((int)i == chosen) ? COL_WHITE : COL_TEXT, body, tile_name[i]);
-    if (y + 100 >= 0 && y + 100 < (int)sh - 16)
-        text((u32)x + 24, (u32)(y + 100), 2, COL_DIM, body, tile_note[i]);
+    if (y + 100 >= 0 && y + 100 < (int)sh - 16) {
+        const char *note = tile_note[i];
+
+        if (i == TILE_APP && app_task)
+            note = "РАБОТАЕТ — ПОЛОСКА ВНИЗУ ПЕРЕКЛЮЧАЕТ";
+        text((u32)x + 24, (u32)(y + 100), 2, COL_DIM, body, note);
+    }
 }
 
 /*
@@ -638,6 +653,30 @@ static int gesture_velocity(void)
     return v;
 }
 
+/*
+ * Запустить приложение.
+ *
+ * Второй раз запускать не даём: окно у программы одно, слоёв под окна
+ * два, и десяток копий одного приложения не нужен никому. Если оно уже
+ * работает — значит его просто спрятали полоской «домой», и вернуть его
+ * той же полоской и надо.
+ */
+static void launch_app(void)
+{
+    s64 id;
+
+    if (app_task)
+        return;
+
+    id = spawn(IMG_HITTIS);
+    if (id > 0) {
+        app_task = (u64)id;
+        write("EL0      : ОБОЛОЧКА: ЗАПУСТИЛА ПРИЛОЖЕНИЕ\n");
+    } else {
+        write("EL0      : ОБОЛОЧКА: ПРИЛОЖЕНИЕ НЕ ЗАПУСТИЛОСЬ\n");
+    }
+}
+
 static void on_down(const struct touch *t)
 {
     touches++;
@@ -737,8 +776,11 @@ static void on_up(const struct touch *t)
     }
 
     /* Касание, которым поймали летящий список, ничего не выбирает */
-    if (!stopped_fling && was >= 0 && tile_at(t->x, t->y) == was)
+    if (!stopped_fling && was >= 0 && tile_at(t->x, t->y) == was) {
         chosen = was;
+        if (was == TILE_APP)
+            launch_app();
+    }
 }
 
 /* --- Точка входа ---------------------------------------------------- */
