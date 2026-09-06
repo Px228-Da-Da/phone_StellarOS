@@ -6,3 +6,5 @@ prebuilt/backup/
 *.elf
 out/
 unpacked/
+hittis/hittis
+hittis/hostrun
