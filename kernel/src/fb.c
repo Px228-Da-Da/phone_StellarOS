@@ -751,9 +751,18 @@ static inline u32 blend(u32 dst, u32 fg, u32 a)
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
+/*
+ * Знак в буфер. under — известный цвет под буквами или 0.
+ *
+ * Когда фон известен (строка только что закрашена целиком), смешивать
+ * надо с ним, а НЕ с тем, что лежит в памяти. Разница огромная: буфер
+ * окна некэшируемый, и чтение из него стоит в разы дороже записи. На
+ * строке в сорок знаков это десятки тысяч лишних чтений, а строк на
+ * кадре два десятка — из этого и складывалась дёрганая прокрутка.
+ */
 static void font_glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
                               const struct font_glyph *g,
-                              int px, int py, u32 fg)
+                              int px, int py, u32 fg, u32 under)
 {
     if (!g->bits)
         return;                 /* пробел и прочие пустые знаки */
@@ -776,7 +785,7 @@ static void font_glyph_to_buf(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
             if ((u32)x >= bw)
                 break;
             dst = &buf[(u64)y * pitch_px + (u32)x];
-            *dst = blend(*dst, fg, a);
+            *dst = blend(under ? under : *dst, fg, a);
         }
     }
 }
@@ -830,7 +839,8 @@ void fb_text_to(u32 *buf, u32 pitch_px, u32 bw, u32 bh,
             break;
 
         font_glyph_to_buf(buf, pitch_px, bw, bh, &g,
-                          (int)x + g.left, (int)(y + f->base) + g.top, fg);
+                          (int)x + g.left, (int)(y + f->base) + g.top, fg,
+                          opaque_bg ? bg : 0);
         x += g.adv;
     }
 }

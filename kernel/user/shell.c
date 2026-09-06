@@ -118,6 +118,12 @@ static u64 vt[VSAMPLES];
 static u32 vn;                      /* сколько их набралось      */
 static int stopped_fling;           /* этим касанием остановили полёт */
 static u64 step_ms;                 /* когда двигали список в прошлый раз */
+static int frac;                    /* недоехавшие тысячные пикселя       */
+
+/* Замер кадра: без чисел «плавно» и «дёргано» остаются спором о вкусах */
+static u64 frame_sum;
+static u32 frame_count;
+static u64 frame_told;
 
 /* Кнопка перезагрузки */
 static int reboot_armed;
@@ -369,12 +375,45 @@ static void show(void)
     back = win + (u64)half * sw * sh;
 }
 
+/*
+ * Кадр целиком.
+ *
+ * Заливки всего окна здесь нет намеренно. Раньше кадр начинался с
+ * ufill на 1080x2340 — десять мегабайт записи в некэшируемую память, —
+ * а потом плитки закрашивали ту же площадь второй раз. Восемнадцать
+ * мегабайт на кадр не укладываются в шестнадцать миллисекунд ни при
+ * каком старании, и прокрутка получалась рваной.
+ *
+ * Теперь каждый пиксель пишется ровно один раз: плитки закрашивают
+ * себя, промежутки между ними — отдельные полосы, поля по краям —
+ * два столбца. Шапка и нижняя полоса рисуются последними и заодно
+ * служат отсечением для уехавших плиток.
+ */
 static void draw_all(void)
 {
-    ufill(back, sw * sh, COL_BG);
+    int y = (int)list_top - scroll;
+    u32 step = TILE_H + GAP;
 
-    for (u32 i = 0; i < TILE_COUNT; i++)
+    /* Поля слева и справа от списка */
+    vrect(0, (int)list_top, MARGIN, (int)(list_bottom - list_top), COL_BG);
+    vrect((int)(MARGIN + tile_w), (int)list_top,
+          (int)(sw - MARGIN - tile_w), (int)(list_bottom - list_top), COL_BG);
+
+    /* Промежуток над первой плиткой — он появляется на резиновом крае */
+    if (y > (int)list_top)
+        vrect(MARGIN, (int)list_top, (int)tile_w, y - (int)list_top, COL_BG);
+
+    for (u32 i = 0; i < TILE_COUNT; i++) {
         draw_tile(i);
+        /* Промежуток под плиткой */
+        vrect(MARGIN, y + TILE_H, (int)tile_w, GAP, COL_BG);
+        y += (int)step;
+    }
+
+    /* Остаток снизу, если список кончился раньше видимой части */
+    if (y < (int)list_bottom)
+        vrect(MARGIN, y, (int)tile_w, (int)list_bottom - y, COL_BG);
+
     draw_scrollbar();
 
     /* Шапка и полоса — последними, поверх списка: это и есть отсечение */
@@ -431,6 +470,7 @@ static int fling_step(void)
 
     if (!scroll_busy()) {
         step_ms = now;
+        frac = 0;
         return 0;
     }
 
@@ -459,7 +499,20 @@ static int fling_step(void)
         return 1;
     }
 
-    scroll -= fling * dt / 1000;
+    /*
+     * Двигаем с накоплением остатка.
+     *
+     * Скорость в пикселях в секунду, время в миллисекундах, а координата
+     * целая: при 200 px/с за кадр набегает три с лишним пикселя, и
+     * дробная часть каждый раз пропадала. На глаз это ступеньки — список
+     * то стоит, то прыгает. Остаток теперь переносится в следующий кадр.
+     */
+    {
+        int move = fling * dt + frac;
+
+        scroll -= move / 1000;
+        frac = move % 1000;
+    }
 
     /* Затухание по миллисекундам: сколько прошло, столько раз и гасим */
     for (int i = 0; i < dt; i++)
@@ -703,8 +756,28 @@ void _start(void)
         }
 
         if (redraw) {
+            u64 t0 = uptime_ms();
+
             draw_all();
             show();
+
+            /*
+             * Раз в секунду говорим, во сколько обходится кадр. Спорить
+             * о плавности словами бессмысленно: либо кадр укладывается в
+             * шестнадцать миллисекунд, либо нет, и это видно числом.
+             */
+            frame_sum += uptime_ms() - t0;
+            frame_count++;
+            if (frame_count >= 30 && uptime_ms() - frame_told > 1000) {
+                frame_told = uptime_ms();
+                ulabel(line, "EL0      : ОБОЛОЧКА: КАДР, МС ",
+                       frame_sum / frame_count);
+                line[ustrlen(line)] = 10;
+                line[ustrlen(line) + 1] = 0;
+                write(line);
+                frame_sum = 0;
+                frame_count = 0;
+            }
         }
     }
 }
