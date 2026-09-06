@@ -68,5 +68,7 @@ extern const u8 user_hello_c_start[];
 extern const u8 user_hello_c_end[];
 extern const u8 user_shell_start[];
 extern const u8 user_shell_end[];
+extern const u8 user_vmapp_start[];
+extern const u8 user_vmapp_end[];
 
 #endif

@@ -1026,3 +1026,16 @@ user_shell_start:
 .align 4
 .global user_shell_end
 user_shell_end:
+
+/*
+ * Исполнитель приложений Hittis. Внутри него — виртуальная машина и
+ * вшитое приложение .slt: пока разделы не читаются, доставить его в
+ * телефон иначе нечем.
+ */
+.align 4
+.global user_vmapp_start
+user_vmapp_start:
+    .incbin "user/vmapp.bin"
+.align 4
+.global user_vmapp_end
+user_vmapp_end:

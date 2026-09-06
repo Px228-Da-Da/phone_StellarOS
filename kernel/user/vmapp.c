@@ -1,0 +1,242 @@
+/*
+ * Исполнитель приложений Hittis — программа в EL0.
+ *
+ * Машина здесь ровно та же, что запускает приложения на компьютере:
+ * файл hittis/vm.c берётся как есть, без единой правки под телефон.
+ * Разница только в этом файле — в том, что происходит, когда приложение
+ * просит нарисовать, напечатать или дождаться пальца. На компьютере это
+ * строчки в терминале, здесь — системные вызовы.
+ *
+ * Так и задумано: приложение не знает, где оно работает, а машина не
+ * знает про svc. Разойтись эти две сборки не могут, потому что исходник
+ * у них один — и это единственный способ проверять приложения без
+ * прошивки телефона и при этом не гадать, совпадёт ли поведение.
+ *
+ * Прав у исполнителя ровно столько же, сколько у любой программы: своё
+ * окно, свой стек, очередь касаний. Приложение внутри него — ещё на
+ * уровень дальше от железа: его проверяет машина, а машину — процессор.
+ */
+#include "ulib.h"
+#include "vm.h"
+
+/* Приложение, вшитое в образ. Пока читать разделы нельзя, это
+ * единственный способ доставить .slt в телефон. */
+#include "app_slt.h"
+
+static u32 *win;                /* начало буфера окна           */
+static u32 *back;               /* половина, в которую рисуем   */
+static u32 half;                /* какая половина показывается  */
+static u32 ww, wh;              /* размеры окна                 */
+static char line[256];
+
+/* --- Что машина просит у мира -------------------------------------- */
+
+static void host_print(const char *s)
+{
+    u32 i = 0;
+
+    while (i < sizeof(line) - 16 && s[i]) {
+        line[i] = s[i];
+        i++;
+    }
+    line[i] = 0;
+    write("EL0      : ");
+    write(line);
+}
+
+static void host_printn(vm_i64 v)
+{
+    u64 mag = (v < 0) ? (u64)(-v) : (u64)v;
+    u32 i = 0;
+
+    line[i++] = 'H';
+    line[i++] = 'T';
+    line[i++] = ':';
+    line[i++] = ' ';
+    if (v < 0)
+        line[i++] = '-';
+    i += unum(line + i, mag);
+    line[i++] = '\n';
+    line[i] = 0;
+    write("EL0      : ");
+    write(line);
+}
+
+/*
+ * Окно. Размер приложение объявляет в заголовке, но последнее слово за
+ * системой: больше экрана окна не бывает, и просьбу мы урезаем молча —
+ * приложение с флешки не обязано знать, какой у этого телефона экран.
+ */
+static int host_window(int w, int h)
+{
+    u32 sw, sh, x, y;
+
+    screen_size(&sw, &sh);
+    if (!sw || !sh)
+        return 0;
+
+    ww = (w > 0 && (u32)w < sw) ? (u32)w : sw;
+    wh = (h > 0 && (u32)h < sh) ? (u32)h : sh;
+
+    win = window(ww, wh);
+    if (!win)
+        return 0;
+
+    /* Показывается первая половина, значит рисуем во вторую */
+    half = 1;
+    back = win + (u64)ww * wh;
+
+    x = (sw - ww) / 2;
+    y = (sh - wh) / 2;
+    if (present(x, y) != 0)
+        return 0;
+
+    return 1;
+}
+
+/*
+ * Прямоугольник. Обрезаем по краям окна сами: приложение вправе
+ * посчитать координаты неверно, и вылет за буфер — не его дело, а наше.
+ * Машина проверяет переходы и ячейки, но что означают числа, знает
+ * только эта сторона.
+ */
+static void host_rect(int x, int y, int w, int h, vm_u32 color)
+{
+    int x1, y1;
+
+    if (!back || w <= 0 || h <= 0)
+        return;
+
+    x1 = x + w;
+    y1 = y + h;
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    if (x1 > (int)ww)
+        x1 = (int)ww;
+    if (y1 > (int)wh)
+        y1 = (int)wh;
+    if (x1 <= x || y1 <= y)
+        return;
+
+    urect(back, ww, (u32)x, (u32)y, (u32)(x1 - x), (u32)(y1 - y), color);
+}
+
+/*
+ * Текст рисует ядро своим шрифтом — в ту же половину, в которую рисуем
+ * мы: оно выбирает непоказываемую само. Фон прозрачный: приложение уже
+ * положило под буквы то, что хотело.
+ */
+static void host_text(int x, int y, int scale, vm_u32 color, const char *s)
+{
+    if (!back || x < 0 || y < 0 || scale <= 0)
+        return;
+
+    text((u32)x, (u32)y, (u32)scale, color, 0, s);
+}
+
+/*
+ * Число на экране. Складывать строку из цифр приходится здесь: в языке
+ * есть только целые, а шрифт ядра рисует байты — превращать одно в
+ * другое больше некому.
+ */
+static void host_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
+{
+    char buf[24];
+    u32 i = 0;
+
+    if (!back || x < 0 || y < 0 || scale <= 0)
+        return;
+
+    if (v < 0) {
+        buf[i++] = '-';
+        v = -v;
+    }
+    unum(buf + i, (u64)v);
+    text((u32)x, (u32)y, (u32)scale, color, 0, buf);
+}
+
+static void host_show(void)
+{
+    if (!back)
+        return;
+
+    flip(half);
+    half ^= 1;
+    back = win + (u64)half * ww * wh;
+}
+
+/*
+ * Касание. Отдаём приложению то же, что получили: точку и что с ней
+ * произошло. Действие кладём выше координат — так одно число остаётся
+ * одним числом, а приложение при желании его разбирает.
+ */
+static vm_i64 host_touch(void)
+{
+    struct touch t;
+
+    if (input(&t) != 1)
+        return -1;
+
+    return ((vm_i64)t.action << 48) | ((vm_i64)t.x << 32) | (vm_i64)t.y;
+}
+
+static void host_sleep(vm_i64 ms)
+{
+    if (ms > 0)
+        sleep_ms((u64)ms);
+}
+
+static vm_i64 host_time(void)   { return (vm_i64)uptime_ms(); }
+static int    host_width(void)  { return (int)ww; }
+static int    host_height(void) { return (int)wh; }
+
+static const struct vm_host host = {
+    .print    = host_print,
+    .printn   = host_printn,
+    .window   = host_window,
+    .rect     = host_rect,
+    .text     = host_text,
+    .textn    = host_textn,
+    .show     = host_show,
+    .touch    = host_touch,
+    .sleep_ms = host_sleep,
+    .time_ms  = host_time,
+    .width    = host_width,
+    .height   = host_height,
+};
+
+void _start(void) __attribute__((section(".text.start")));
+
+void _start(void)
+{
+    const char *name = vm_app_name(app_slt, app_slt_len);
+    int rc;
+
+    if (!name) {
+        write("EL0      : HITTIS: ЭТО НЕ ПРИЛОЖЕНИЕ StellarOS\n");
+        exit(20);
+    }
+
+    write("EL0      : HITTIS: ЗАПУСКАЮ ");
+    write(name);
+    write("\n");
+
+    rc = vm_run(app_slt, app_slt_len, &host);
+
+    /*
+     * Приложение кончилось — окно закрываем. Не забыть об этом важнее,
+     * чем кажется: слоёв у контроллера дисплея всего два на всех, и
+     * невозвращённый останется занятым до перезагрузки.
+     */
+    window_close();
+
+    if (rc != 0) {
+        write("EL0      : HITTIS: ПРИЛОЖЕНИЕ ОСТАНОВЛЕНО МАШИНОЙ\n");
+        exit(21);
+    }
+
+    write("EL0      : HITTIS: ПРИЛОЖЕНИЕ ЗАВЕРШИЛОСЬ САМО\n");
+    exit(0);
+}

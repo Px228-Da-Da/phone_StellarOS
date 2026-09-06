@@ -67,6 +67,19 @@ CFLAGS := -MMD -MP -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 ASFLAGS := $(CFLAGS) -I$(BUILD)
 LDFLAGS := -nostdlib -T linker.ld --defsym LOAD_ADDR=$(LOAD_ADDR)
 
+# Приложения на Hittis.
+#
+# Компилятор и виртуальная машина живут в ../hittis и собираются дважды:
+# для компьютера — здесь, чтобы превратить .ht в .slt, и для телефона —
+# вместе с исполнителем в EL0. Исходник у машины при этом один, и разойтись
+# двум сборкам негде.
+#
+# HOSTCC — именно компилятор этой машины, не кроссовый: инструменты
+# должны запускаться здесь и сейчас.
+HITTIS  := ../hittis
+HOSTCC  ?= cc
+APP_SRCS := $(wildcard ../apps/*.ht)
+
 USER_SRCS := $(wildcard user/*.c)
 USER_BINS := $(patsubst user/%.c,$(BUILD)/user/%.bin,$(USER_SRCS))
 
@@ -100,6 +113,30 @@ $(BUILD)/user:
 # а значит с расхождением между тем, что зовёт программа, и тем, что
 # ждёт ядро.
 USER_DEPS := user/ulib.h include/syscall.h user/user.ld
+
+# --- Приложения на Hittis ---
+
+$(BUILD)/host/hittis: $(HITTIS)/hittis.c $(HITTIS)/slt.h
+	@mkdir -p $(BUILD)/host
+	$(HOSTCC) -O2 -o $@ $<
+
+$(BUILD)/host/bin2c: $(HITTIS)/bin2c.c
+	@mkdir -p $(BUILD)/host
+	$(HOSTCC) -O2 -o $@ $<
+
+$(BUILD)/apps/%.slt: ../apps/%.ht $(BUILD)/host/hittis
+	@mkdir -p $(BUILD)/apps
+	$(BUILD)/host/hittis $< $@
+
+# Приложение становится массивом байт: вшить его в образ — единственный
+# способ доставить .slt в телефон, пока разделы не читаются.
+$(BUILD)/user/app_slt.h: $(BUILD)/apps/demo.slt $(BUILD)/host/bin2c | $(BUILD)/user
+	$(BUILD)/host/bin2c $< app_slt > $@
+
+# Исполнитель — единственная программа из двух исходников: свой и машина
+# из ../hittis. Поэтому у него отдельное правило, а не общее по шаблону.
+$(BUILD)/user/vmapp.elf: user/vmapp.c $(HITTIS)/vm.c $(HITTIS)/vm.h                          $(HITTIS)/slt.h $(BUILD)/user/app_slt.h                          $(USER_DEPS) | $(BUILD)/user
+	$(CC) $(CFLAGS) -Iuser -I$(HITTIS) -I$(BUILD)/user -static 	      -T user/user.ld -o $@ user/vmapp.c $(HITTIS)/vm.c
 
 $(BUILD)/user/%.elf: user/%.c $(USER_DEPS) | $(BUILD)/user
 	$(CC) $(CFLAGS) -Iuser -static -T user/user.ld -o $@ $<

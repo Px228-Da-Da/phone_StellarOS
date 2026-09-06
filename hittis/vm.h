@@ -39,13 +39,30 @@ struct vm_host {
     int     (*window)(int w, int h);
     void    (*rect)(int x, int y, int w, int h, vm_u32 color);
     void    (*text)(int x, int y, int scale, vm_u32 color, const char *s);
+    void    (*textn)(int x, int y, int scale, vm_u32 color, vm_i64 v);
     void    (*show)(void);
-    vm_i64  (*touch)(void);         /* x в старшей половине, y в младшей */
+    vm_i64  (*touch)(void);         /* см. договор о касании ниже        */
     void    (*sleep_ms)(vm_i64 ms);
     vm_i64  (*time_ms)(void);
     int     (*width)(void);
     int     (*height)(void);
 };
+
+/*
+ * Как упаковано касание, которое возвращает touch:
+ *
+ *   биты 48..    что произошло: 0 нажали, 1 ведут, 2 отпустили
+ *   биты 32..47  x
+ *   биты 0..31   y
+ *
+ * Одним числом, а не тремя, потому что у машины нет ни структур, ни
+ * возврата нескольких значений: приложение достаёт нужное делением и
+ * остатком, как это делают на всяком маленьком языке. Отрицательное
+ * число означает, что касаний больше не будет.
+ */
+#define VM_TOUCH_ACTION(v)  (((v) >> 48) & 0xFF)
+#define VM_TOUCH_X(v)       (((v) >> 32) & 0xFFFF)
+#define VM_TOUCH_Y(v)       ((v) & 0xFFFFFFFF)
 
 /*
  * Запустить приложение.

@@ -40,8 +40,30 @@ static void h_text(int x, int y, int scale, vm_u32 c, const char *s)
     printf("[текст %d,%d размер %d цвет %08x: %s]\n", x, y, scale, c, s);
 }
 
+static void h_textn(int x, int y, int scale, vm_u32 c, vm_i64 v)
+{
+    printf("[число %d,%d размер %d цвет %08x: %lld]\n", x, y, scale, c, v);
+}
+
 static void h_show(void)                { printf("[показать]\n"); }
-static vm_i64 h_touch(void)             { printf("[ждём касание — на компьютере их нет]\n"); return 0; }
+/*
+ * Касаний на компьютере нет, поэтому выдаём несколько придуманных и
+ * заканчиваем. Не заглушка «всегда ноль»: приложение обязано уметь
+ * дожить до конца касаний, и проверять это лучше здесь, чем на телефоне.
+ */
+static vm_i64 h_touch(void)
+{
+    static int n;
+    vm_i64 x = 200 + (n % 3) * 40;
+    vm_i64 y = 100 + (n % 3) * 200;
+
+    if (n++ >= 6) {
+        printf("[придуманные касания кончились]\n");
+        return -1;
+    }
+    printf("[касание %lld,%lld]\n", x, y);
+    return ((vm_i64)0 << 48) | (x << 32) | y;
+}
 static void h_sleep(vm_i64 ms)          { printf("[сон %lld мс]\n", ms); }
 
 static vm_i64 h_time(void)
@@ -56,7 +78,7 @@ static int h_width(void)                { return win_w; }
 static int h_height(void)               { return win_h; }
 
 static const struct vm_host host = {
-    h_print, h_printn, h_window, h_rect, h_text,
+    h_print, h_printn, h_window, h_rect, h_text, h_textn,
     h_show, h_touch, h_sleep, h_time, h_width, h_height
 };
 

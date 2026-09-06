@@ -399,6 +399,7 @@ static const struct {
     { "window", NAT_WINDOW, 2 },
     { "rect",   NAT_RECT,   5 },
     { "text",   NAT_TEXT,   5 },
+    { "textn",  NAT_TEXTN,  5 },
     { "show",   NAT_SHOW,   0 },
     { "touch",  NAT_TOUCH,  0 },
     { "sleep",  NAT_SLEEP,  1 },

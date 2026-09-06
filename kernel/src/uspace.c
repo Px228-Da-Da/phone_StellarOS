@@ -195,6 +195,7 @@ static const struct {
     { "панель",     user_panel_start, user_panel_end },
     { "привет-си",  user_hello_c_start, user_hello_c_end },
     { "оболочка",   user_shell_start, user_shell_end },
+    { "hittis",     user_vmapp_start, user_vmapp_end },
 };
 
 s64 uspace_spawn_image(u32 index)

@@ -71,6 +71,7 @@
 #define IMG_PANEL       8
 #define IMG_HELLO_C     9
 #define IMG_SHELL       10
+#define IMG_HITTIS      11
 
 /* Сколько байт за раз принимает SYS_WRITE. Ограничение обязательно:
  * длину задаёт программа, и без потолка она попросила бы ядро пройти
