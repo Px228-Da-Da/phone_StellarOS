@@ -315,6 +315,20 @@ static void power_task(void *arg)
     }
 }
 
+/*
+ * Последний замер батареи.
+ *
+ * Читатель у PMIC ровно один — задача питания. Полоса состояния и пульс
+ * берут готовое: канал к PMIC последовательный и небыстрый, а два
+ * читателя в разных задачах — это две посылки внахлёст на одной шине.
+ * Пока обходилось, но обходиться такое перестаёт в самый неудобный
+ * момент.
+ */
+void battery_last(struct battery_state *out)
+{
+    *out = power_batt;
+}
+
 static void draw_battery(void)
 {
     struct battery_state st = power_batt;

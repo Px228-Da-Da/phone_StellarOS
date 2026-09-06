@@ -12,6 +12,7 @@
 #include "font.h"
 #include "splash.h"
 #include "uiarea.h"
+#include "battery.h"
 #include "window.h"
 #include "mmu.h"
 #include "gic.h"
@@ -1771,6 +1772,26 @@ static void heartbeat_task(void *arg)
 
         kprintf("         ВВОД: ОПРОСОВ %lu, СБОЕВ %lu, СОБЫТИЙ %lu, ПОТЕРЯНО %u\n",
                 input_scans, input_fails, input_events, input_dropped);
+
+        /*
+         * Батарея — в каждом пульсе.
+         *
+         * Первый замер печатался один раз при загрузке и терялся: кольцо
+         * консоли шестнадцать килобайт, а разведка eMMC выталкивает его
+         * целиком раньше, чем терминал успевает подключиться. Строка раз
+         * в десять секунд стоит копейки и всегда на виду.
+         */
+        {
+            struct battery_state bat;
+
+            battery_last(&bat);
+            if (bat.valid)
+                kprintf("         БАТАРЕЯ: %u мВ, БЕЗ НАГРУЗКИ %u мВ, ТОК %d мА, ЗАРЯД %u%%%s\n",
+                        bat.mv, bat.ocv_mv, bat.current_ma, bat.percent,
+                        battery_current_valid() ? "" : " (СЧЁТЧИК МОЛЧИТ)");
+            else
+                kprintf("         БАТАРЕЯ: ЗАМЕР НЕ ВЫШЕЛ\n");
+        }
 
         /*
          * Тики по ядрам — и сразу видно, какое из них замолчало.

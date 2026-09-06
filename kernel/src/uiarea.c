@@ -97,7 +97,7 @@ void ui_status_draw(void)
     fb_text(220, 26, 2, COL_TEXT, COL_BAR, line);
 
     /* --- заряд справа --- */
-    battery_read(&bat);
+    battery_last(&bat);
     n = 0;
     if (bat.valid) {
         n += num(line + n, bat.percent);
