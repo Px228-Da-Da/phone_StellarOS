@@ -40,9 +40,39 @@
 #define SLOP        14
 
 #define FLICK_MAX   9000        /* быстрее пальца всё равно не бывает, px/с */
-#define FLICK_MIN   120         /* тише этого — просто отпустили, px/с      */
-#define FRICTION    93          /* сколько процентов скорости остаётся за кадр */
+#define FLICK_MIN   90          /* тише этого — просто отпустили, px/с      */
 #define FRAME_MS    16
+
+/*
+ * Затухание броска: тысячных долей скорости остаётся за МИЛЛИСЕКУНДУ.
+ *
+ * 0,998 в миллисекунду — то самое «долгое» затухание, к которому приучил
+ * айфон: за секунду от скорости остаётся примерно седьмая часть. Первое,
+ * что здесь стояло, отнимало по семь процентов за кадр, и список
+ * останавливался вдвое быстрее — движение выглядело не свободным
+ * полётом, а торможением в песке.
+ *
+ * Считаем на миллисекунду, а не на кадр, потому что кадр у нас не
+ * постоянный: полная перерисовка экрана 1080x2340 стоит два десятка
+ * миллисекунд, и на фиксированном шаге список полз бы медленнее
+ * задуманного ровно во столько раз, во сколько кадр длиннее.
+ */
+#define DECAY       998
+
+/*
+ * Резиновые края.
+ *
+ * За границей список идёт втрое медленнее пальца, а отпустишь — сам
+ * возвращается. Это не украшение: без него непонятно, кончился список
+ * или система перестала отвечать. Палец тянет, ничего не двигается —
+ * и человек честно думает, что всё зависло.
+ */
+#define RUBBER      3           /* во сколько раз слабее тянется за краем */
+#define RUBBER_MAX  180         /* дальше этого не пускаем вовсе, px      */
+#define SPRING      28          /* процентов оставшегося пути за кадр     */
+
+/* Сколько последних точек помним для скорости броска */
+#define VSAMPLES    4
 
 #define COL_BG      0xFF0B1020
 #define COL_TILE    0xFF16203A
@@ -83,8 +113,11 @@ static int dragging;
 static u32 down_x, down_y;
 static int down_scroll;
 static u64 down_ms;
-static u32 last_y;
-static u64 last_ms;
+static u32 vy[VSAMPLES];            /* последние точки пальца    */
+static u64 vt[VSAMPLES];
+static u32 vn;                      /* сколько их набралось      */
+static int stopped_fling;           /* этим касанием остановили полёт */
+static u64 step_ms;                 /* когда двигали список в прошлый раз */
 
 /* Кнопка перезагрузки */
 static int reboot_armed;
@@ -328,48 +361,164 @@ static void draw_all(void)
 
 /* --- Прокрутка ------------------------------------------------------ */
 
+/*
+ * Куда поставить список.
+ *
+ * За краями не обрезаем, а пускаем с сопротивлением: палец уводит список
+ * втрое слабее, чем внутри, и не дальше ладони. Возвращает его пружина —
+ * см. fling_step.
+ */
 static void scroll_to(int v)
 {
-    if (v < 0)
-        v = 0;
-    if (v > scroll_max)
-        v = scroll_max;
+    if (v < 0) {
+        v /= RUBBER;
+        if (v < -RUBBER_MAX)
+            v = -RUBBER_MAX;
+    } else if (v > scroll_max) {
+        v = scroll_max + (v - scroll_max) / RUBBER;
+        if (v > scroll_max + RUBBER_MAX)
+            v = scroll_max + RUBBER_MAX;
+    }
     scroll = v;
 }
 
+/* Внутри границ или уже за ними */
+static int out_of_bounds(void)
+{
+    return scroll < 0 || scroll > scroll_max;
+}
+
+/* Список сам по себе в движении: летит или возвращается пружиной */
+static int scroll_busy(void)
+{
+    return fling != 0 || out_of_bounds();
+}
+
 /*
- * Шаг инерции.
+ * Шаг движения: сначала пружина, потом полёт.
  *
  * Скорость гасим долей за кадр, а не вычитанием: тогда быстрый бросок
  * летит долго, а медленный останавливается сразу — так ведёт себя
- * трение, и так это выглядит естественно. Возвращает 1, пока движение
- * продолжается.
+ * трение. Возвращает 1, пока картинка меняется.
  */
 static int fling_step(void)
 {
-    int was = scroll;
+    u64 now = uptime_ms();
+    int dt, edge, d;
 
-    if (!fling)
-        return 0;
-
-    scroll_to(scroll - fling * FRAME_MS / 1000);
-    fling = fling * FRICTION / 100;
-
-    /* Упёрлись в край или почти встали — движение кончилось */
-    if (scroll == was || (fling < FLICK_MIN && fling > -FLICK_MIN)) {
-        fling = 0;
+    if (!scroll_busy()) {
+        step_ms = now;
         return 0;
     }
+
+    dt = step_ms ? (int)(now - step_ms) : FRAME_MS;
+    step_ms = now;
+    if (dt < 1)
+        dt = 1;
+    if (dt > 64)                /* проспали дольше — не прыгаем через пол-экрана */
+        dt = 64;
+
+    /* Пружина сильнее полёта: за краем список только возвращается */
+    if (out_of_bounds()) {
+        edge = (scroll < 0) ? 0 : scroll_max;
+        d = edge - scroll;
+        fling = 0;
+
+        if (d > -3 && d < 3) {
+            scroll = edge;
+            return 1;
+        }
+
+        /* Шаг — доля оставшегося пути: у самого края движение
+         * замедляется само, а не обрывается на полпути */
+        d = d * SPRING * dt / (100 * FRAME_MS);
+        scroll += d ? d : (edge > scroll ? 1 : -1);
+        return 1;
+    }
+
+    scroll -= fling * dt / 1000;
+
+    /* Затухание по миллисекундам: сколько прошло, столько раз и гасим */
+    for (int i = 0; i < dt; i++)
+        fling = fling * DECAY / 1000;
+
+    /*
+     * Долетели до края на скорости — пусть выскочит за него и вернётся
+     * пружиной. Резко обрывать движение нельзя: именно по отскоку глаз
+     * понимает, что список кончился, а не застрял.
+     */
+    if (scroll < -RUBBER_MAX) {
+        scroll = -RUBBER_MAX;
+        fling = 0;
+    } else if (scroll > scroll_max + RUBBER_MAX) {
+        scroll = scroll_max + RUBBER_MAX;
+        fling = 0;
+    }
+
+    if (fling < FLICK_MIN && fling > -FLICK_MIN)
+        fling = 0;
 
     return 1;
 }
 
 /* --- Разбор касаний ------------------------------------------------- */
 
+static void vsample(u32 y, u64 ms)
+{
+    if (vn < VSAMPLES) {
+        vy[vn] = y;
+        vt[vn] = ms;
+        vn++;
+        return;
+    }
+    for (u32 i = 1; i < VSAMPLES; i++) {
+        vy[i - 1] = vy[i];
+        vt[i - 1] = vt[i];
+    }
+    vy[VSAMPLES - 1] = y;
+    vt[VSAMPLES - 1] = ms;
+}
+
+/*
+ * Скорость броска — по последним точкам, а не по всему жесту.
+ *
+ * Важно, как палец двигался в конце: медленно провёл и резко дёрнул
+ * напоследок — список должен полететь. По двум соседним событиям
+ * получается дёрганно (между ними бывает три миллисекунды и один
+ * пиксель), поэтому берём окно из нескольких точек.
+ */
+static int gesture_velocity(void)
+{
+    u64 dt;
+    int v;
+
+    if (vn < 2)
+        return 0;
+
+    dt = vt[vn - 1] - vt[0];
+    if (!dt)
+        return 0;
+
+    v = ((int)vy[vn - 1] - (int)vy[0]) * 1000 / (int)dt;
+    if (v > FLICK_MAX)
+        v = FLICK_MAX;
+    if (v < -FLICK_MAX)
+        v = -FLICK_MAX;
+
+    return v;
+}
+
 static void on_down(const struct touch *t)
 {
     touches++;
-    fling = 0;                  /* палец на экране останавливает разгон */
+
+    /*
+     * Касание во время полёта только останавливает список и ничего не
+     * выбирает. Так ведёт себя всякий приличный список: палец ловит
+     * убегающий текст, а не открывает то, на что случайно попал.
+     */
+    stopped_fling = scroll_busy();
+    fling = 0;
 
     if (in_button(t->x, t->y)) {
         if (reboot_armed) {
@@ -390,15 +539,14 @@ static void on_down(const struct touch *t)
     down_y = t->y;
     down_scroll = scroll;
     down_ms = uptime_ms();
-    last_y = t->y;
-    last_ms = down_ms;
-    pressed = tile_at(t->x, t->y);
+    vn = 0;
+    vsample(t->y, down_ms);
+    pressed = stopped_fling ? -1 : tile_at(t->x, t->y);
 }
 
 static void on_move(const struct touch *t)
 {
     int dy;
-    u64 now;
 
     if (!touching)
         return;
@@ -419,24 +567,7 @@ static void on_move(const struct touch *t)
         return;
 
     scroll_to(down_scroll - dy);
-
-    /*
-     * Скорость считаем по последним двум событиям, а не по всему жесту:
-     * важно, как палец двигался в конце. Медленно провёл и резко дёрнул
-     * напоследок — список должен полететь.
-     */
-    now = uptime_ms();
-    if (now > last_ms) {
-        int v = ((int)t->y - (int)last_y) * 1000 / (int)(now - last_ms);
-
-        if (v > FLICK_MAX)
-            v = FLICK_MAX;
-        if (v < -FLICK_MAX)
-            v = -FLICK_MAX;
-        fling = v;
-        last_y = t->y;
-        last_ms = now;
-    }
+    vsample(t->y, uptime_ms());
 }
 
 static void on_up(const struct touch *t)
@@ -448,19 +579,20 @@ static void on_up(const struct touch *t)
         return;
     }
     touching = 0;
+    pressed = -1;
 
     if (dragging) {
-        /* Бросок: медленное отпускание не должно ничего запускать */
+        vsample(t->y, uptime_ms());
+        fling = gesture_velocity();
         if (fling < FLICK_MIN && fling > -FLICK_MIN)
-            fling = 0;
+            fling = 0;          /* просто отпустили, а не бросили */
         dragging = 0;
-        pressed = -1;
         return;
     }
 
-    if (was >= 0 && tile_at(t->x, t->y) == was)
+    /* Касание, которым поймали летящий список, ничего не выбирает */
+    if (!stopped_fling && was >= 0 && tile_at(t->x, t->y) == was)
         chosen = was;
-    pressed = -1;
 }
 
 /* --- Точка входа ---------------------------------------------------- */
@@ -512,7 +644,7 @@ void _start(void)
     for (;;) {
         struct touch t;
         s64 got;
-        int moving = (fling != 0);
+        int moving = scroll_busy();
         int redraw = 0;
 
         /*
