@@ -107,6 +107,22 @@ static void subs_push_locked(const struct input_event *e, u64 target)
     }
 }
 
+/* Скольким очередям досталось событие. Под замком ввода. */
+static u32 subs_count_locked(u64 target)
+{
+    u32 n = 0;
+
+    for (u32 i = 0; i < SUB_MAX; i++) {
+        if (!subs[i].owner)
+            continue;
+        if (target && subs[i].owner != target)
+            continue;
+        n++;
+    }
+
+    return n;
+}
+
 int input_pop_task(u64 task, struct input_event *e)
 {
     u64 flags = spin_lock_irq(&input_lock);
@@ -160,12 +176,16 @@ void input_unsubscribe(u64 task)
  */
 static u64 grabbed[MAX_FINGERS + 1];
 
+/* Сколько нажатий уже разобрано вслух */
+static u32 told_touch;
+
 static void event_push(u8 id, u8 action, u16 x, u16 y)
 {
     u32 next;
     u64 flags;
     u64 target;
     u16 sub_x = x, sub_y = y;
+    u32 delivered = 0;
     struct input_event ev, sub_ev;
 
     /*
@@ -255,6 +275,7 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
     sub_ev.x = sub_x;
     sub_ev.y = sub_y;
     subs_push_locked(&sub_ev, target);
+    delivered = subs_count_locked(target);
     spin_unlock_irq(&input_lock, flags);
 
     /* Разбудить тех, кто спит в ожидании касания. Замок очереди событий
@@ -262,6 +283,22 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
      * планировщика поверх нашего — а этот порядок в другом месте может
      * оказаться обратным, и получилась бы взаимная блокировка. */
     sched_wake(INPUT_CHAN);
+
+    /*
+     * Докладываем только про нажатие: ведение идёт сотнями событий в
+     * секунду и залило бы консоль, а разобраться нужно ровно в одном —
+     * кому адресовано касание и какими числами оно уходит.
+     */
+    /*
+     * Только первые несколько нажатий: этого хватает, чтобы увидеть,
+     * кому уходят касания и какими числами, а дальше строка на каждое
+     * касание превратилась бы в помеху.
+     */
+    if (action == TOUCH_DOWN && told_touch < 8) {
+        told_touch++;
+        kprintf("ВВОД     : ЭКРАН %u,%u -> ЗАДАЧА %lu, В ОКНЕ %u,%u, ОЧЕРЕДЕЙ %u\n",
+                x, y, (unsigned long)target, sub_x, sub_y, delivered);
+    }
 }
 
 int input_pop(struct input_event *e)

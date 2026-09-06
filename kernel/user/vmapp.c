@@ -78,6 +78,24 @@ static void host_printn(vm_i64 v)
 static int host_window(int w, int h)
 {
     u32 sw, sh, x, y;
+    u32 *buf;
+
+    /*
+     * Окно у программы одно, и просят его дважды.
+     *
+     * Первый раз — машина, по заголовку .slt; второй — сама программа
+     * строкой window(...). Ядро на второй раз отказывает, и правильно
+     * делает: второе окно одной задаче не положено.
+     *
+     * Раньше отказ затирал указатель на буфер нулём, и это стоило
+     * долгих поисков: первый кадр показывался, а дальше и рисование, и
+     * смена половины молча выходили сразу — приложение исправно
+     * получало касания, считало плитки и печатало их, но на экране
+     * ничего не менялось. Молчаливый отказ хуже громкого: искать
+     * приходится там, где ничего не сломано.
+     */
+    if (win)
+        return 1;
 
     screen_size(&sw, &sh);
     if (!sw || !sh)
@@ -86,9 +104,12 @@ static int host_window(int w, int h)
     ww = (w > 0 && (u32)w < sw) ? (u32)w : sw;
     wh = (h > 0 && (u32)h < sh) ? (u32)h : sh;
 
-    win = window(ww, wh);
-    if (!win)
+    buf = window(ww, wh);
+    if (!buf) {
+        say("EL0      : HITTIS: ОКНА НЕ ДАЛИ", 0);
         return 0;
+    }
+    win = buf;
 
     /* Показывается первая половина, значит рисуем во вторую */
     half = 1;
@@ -167,10 +188,15 @@ static void host_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
 
 static void host_show(void)
 {
+    static u32 said;
+
     if (!back)
         return;
 
-    flip(half);
+    if (flip(half) != 0 && !said) {
+        said = 1;
+        say("EL0      : HITTIS: ЯДРО НЕ МЕНЯЕТ ПОЛОВИНУ ОКНА", 0);
+    }
     half ^= 1;
     back = win + (u64)half * ww * wh;
 }

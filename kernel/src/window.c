@@ -63,6 +63,7 @@ struct window {
     int  layer;             /* номер занятого слоя или -1           */
     int  told_copy;         /* уже сказали, что идём копией         */
     int  placed;            /* окно хоть раз показано на экране     */
+    u32  flips;             /* сколько раз меняли половину          */
     u32  moves;             /* сколько раз переезжало по экрану     */
 };
 
@@ -172,6 +173,8 @@ u64 window_open(u32 w, u32 h)
     win->layer = -1;
     win->told_copy = 0;
     win->moves = 0;
+    win->placed = 0;        /* слот мог достаться от прежнего хозяина */
+    win->flips = 0;
 
     /*
      * Отображаем буфер программе некэшируемым — тем же, чем он помечен у
@@ -560,6 +563,13 @@ int window_flip(u32 half)
     }
 
     addr = (u8 *)win->buf + (u64)half * win->half;
+
+    /* Первые смены половины показываем поимённо: спор о том, доходит ли
+     * нарисованное до экрана, решается только этими числами. */
+    if (win->flips < 4)
+        kprintf("ОКНО     : %s СМЕНА %u: СЛОЙ %d, ПОЛОВИНА %u, АДРЕС %p\n",
+                task_name(), win->flips, win->layer, half, addr);
+    win->flips++;
 
     for (int attempt = 0; attempt < 3; attempt++) {
         u64 flags;
