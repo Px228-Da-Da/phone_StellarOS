@@ -1,0 +1,201 @@
+# qt2 — user interface for Hittis.
+#
+# Всё, что рисуется и нажимается, живёт здесь. Приложению остаётся
+# сказать, из чего оно состоит, — и один раз в цикле спросить экран,
+# куда попал палец.
+#
+# Подключается строкой «use qt2» в начале программы.
+#
+# Устройство простое до неприличия, и это намеренно. Виджет обязан уметь
+# ровно два действия: нарисовать себя и ответить, попал ли в него палец.
+# Больше ничего от него не требуется, поэтому в список экрана можно
+# класть что угодно — метод ищется по имени во время работы, и кнопка
+# рядом с надписью машине безразличны.
+#
+# Своего состояния у библиотеки нет: ни глобальных переменных, ни
+# скрытого «текущего экрана». Всё, что помнится, лежит в объектах,
+# которые завело приложение.
+
+# --- Colors ---------------------------------------------------------
+#
+# Числами, а не именами: в языке нет ни констант, ни перечислений, а
+# заводить под каждый цвет глобальную значило бы занимать имя, которое
+# приложению может понадобиться.
+
+class Theme:
+    def create(self):
+        self.background = 0xFF101218
+        self.panel      = 0xFF1B2029
+        self.face       = 0xFF252C38
+        self.accent     = 0xFF4C8DFF
+        self.danger     = 0xFFE05252
+        self.ink        = 0xFFFFFFFF
+        self.dim        = 0xFFB8C0CC
+        return 0
+
+
+# --- Label ----------------------------------------------------------
+
+class Label:
+    def create(self, x, y, size, color, caption):
+        self.x = x
+        self.y = y
+        self.size = size
+        self.color = color
+        self.caption = caption
+        return 0
+
+    def draw(self):
+        text(self.x, self.y, self.size, self.color, self.caption)
+        return 0
+
+    # Надпись пальца не ловит, но метод нужен: экран спрашивает всех
+    # подряд и не обязан знать, кто перед ним.
+    def hit(self, px, py):
+        return 0
+
+    def press(self, down):
+        return 0
+
+
+# --- Number ---------------------------------------------------------
+#
+# Отдельный виджет, а не надпись: в языке нет превращения числа в
+# строку, и показать счёт можно только отдельным вызовом.
+
+class Number:
+    def create(self, x, y, size, color, value):
+        self.x = x
+        self.y = y
+        self.size = size
+        self.color = color
+        self.value = value
+        return 0
+
+    def draw(self):
+        textn(self.x, self.y, self.size, self.color, self.value)
+        return 0
+
+    def hit(self, px, py):
+        return 0
+
+    def press(self, down):
+        return 0
+
+
+# --- Button ---------------------------------------------------------
+
+class Button:
+    def create(self, x, y, w, h, caption):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.caption = caption
+        self.face = 0xFF252C38
+        self.down = 0xFF4C8DFF
+        self.ink = 0xFFFFFFFF
+        self.pressed = 0
+        # Чем кнопку пометило приложение: свой номер, код, что угодно.
+        # Библиотека в это значение не смотрит вовсе.
+        self.tag = 0
+        return 0
+
+    def paint(self, face, down, ink):
+        self.face = face
+        self.down = down
+        self.ink = ink
+        return 0
+
+    def mark(self, tag):
+        self.tag = tag
+        return self
+
+    def draw(self):
+        color = self.face
+        if self.pressed:
+            color = self.down
+        rect(self.x, self.y, self.w, self.h, color)
+        text(self.x + 20, self.y + self.h / 2 - 16, 4, self.ink, self.caption)
+        return 0
+
+    def hit(self, px, py):
+        if px < self.x:
+            return 0
+        if px > self.x + self.w:
+            return 0
+        if py < self.y:
+            return 0
+        if py > self.y + self.h:
+            return 0
+        return 1
+
+    def press(self, down):
+        self.pressed = down
+        return 0
+
+
+# --- Screen ---------------------------------------------------------
+#
+# Экран держит список виджетов и знает про палец ровно одно: какому
+# виджету он достался. Что с этим делать, решает приложение.
+
+class Screen:
+    def create(self, background):
+        self.background = background
+        self.items = []
+        self.held = 0
+        return 0
+
+    def place(self, item):
+        add(self.items, item)
+        return item
+
+    def draw(self):
+        rect(0, 0, width(), height(), self.background)
+        i = 0
+        while i < len(self.items):
+            self.items[i].draw()
+            i = i + 1
+        show()
+        return 0
+
+    # Кто под точкой; 0 — никто.
+    def at(self, px, py):
+        i = 0
+        while i < len(self.items):
+            if self.items[i].hit(px, py):
+                return self.items[i]
+            i = i + 1
+        return 0
+
+    # Разобрать касание и вернуть виджет, который нажали и отпустили.
+    #
+    # Возвращается только на отпускании и только если палец отпустили
+    # там же, где нажали, — так ведёт себя всякий приличный интерфейс:
+    # уведя палец в сторону, нажатие можно отменить.
+    def handle(self, action, px, py):
+        who = self.at(px, py)
+
+        if action == 0:
+            if who:
+                who.press(1)
+                self.held = who
+            return 0
+
+        if action == 1:
+            if self.held:
+                if who == self.held:
+                    self.held.press(1)
+                else:
+                    self.held.press(0)
+            return 0
+
+        # Отпустили
+        if self.held:
+            self.held.press(0)
+            if who == self.held:
+                self.held = 0
+                return who
+            self.held = 0
+        return 0

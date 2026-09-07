@@ -1,0 +1,53 @@
+# Counter written with qt2: no drawing by hand at all.
+#
+# The whole app is: describe the screen once, then ask it who was
+# pressed. Rectangles, text and hit testing live in the library.
+
+use qt2
+
+app "UI"
+
+theme = Theme()
+screen = Screen(theme.background)
+
+title = screen.place(Label(40, 40, 4, theme.dim, "QT2 COUNTER"))
+value = screen.place(Number(40, 120, 8, theme.ink, 0))
+
+plus  = screen.place(Button(40, 260, 200, 120, "+1"))
+minus = screen.place(Button(280, 260, 200, 120, "-1"))
+reset = screen.place(Button(40, 420, 440, 120, "RESET"))
+
+plus.mark(1)
+minus.mark(2)
+reset.mark(3)
+reset.paint(theme.danger, theme.accent, theme.ink)
+
+count = 0
+alive = 1
+
+screen.draw()
+print("QT2: SCREEN IS READY")
+
+while alive:
+    touchValue = touch()
+    if touchValue < 0:
+        alive = 0
+    else:
+        mln = 65536 * 65536
+        action = touchValue / (mln * 65536)
+        x = (touchValue / mln) % 65536
+        y = touchValue % mln
+
+        who = screen.handle(action, x, y)
+        if who:
+            if who.tag == 1:
+                count = count + 1
+            if who.tag == 2:
+                count = count - 1
+            if who.tag == 3:
+                count = 0
+            value.value = count
+
+        screen.draw()
+
+print("QT2: DONE")

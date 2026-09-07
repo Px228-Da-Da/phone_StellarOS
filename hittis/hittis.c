@@ -1085,67 +1085,133 @@ static void parse_app(void)
  * присваивает через self. Так меньше слов и не бывает расхождения между
  * списком полей и тем, что на самом деле используется.
  */
+/*
+ * Обойти классы заранее.
+ *
+ * Как и с функциями: тело метода может обращаться к классу, который в
+ * исходнике ниже. Разбираем сначала объявления, потом код — иначе
+ * порядок в файле начал бы решать, что можно назвать.
+ *
+ * Тело каждого класса читается ДВАЖДЫ: сначала поля, потом методы.
+ * Это не лень, а необходимость. Члены класса лежат в общей таблице
+ * подряд, сначала поля, потом методы, и машина находит их по этому
+ * порядку. Первый вариант обходил все классы за поля, а потом все за
+ * методы — и у второго класса члены перемешивались с чужими. С одним
+ * классом это работало, и потому не было видно.
+ *
+ * Поля нигде не объявляются: ими становится всё, чему метод присваивает
+ * через self. Меньше слов, и не бывает расхождения между списком полей и
+ * тем, что на деле используется.
+ */
 static void prescan_classes(void)
 {
-    int i, cls = -1, depth = 0;
+    int i;
+
+    /* Нулевая функция — сама программа: тело верхнего уровня */
+    strcpy(func_name[0], "");
+    nfuncs = 1;
 
     for (i = 0; i + 1 < ntok; i++) {
-        if (toks[i].kind == T_INDENT && cls >= 0) {
-            depth++;
-            continue;
-        }
-        if (toks[i].kind == T_DEDENT && cls >= 0) {
-            if (--depth <= 0)
-                cls = -1;               /* тело класса кончилось */
-            continue;
-        }
+        int cls, j, start, end, depth, k;
 
-        if (toks[i].kind == T_NAME && !strcmp(toks[i].text, "class") &&
-            toks[i + 1].kind == T_NAME) {
-            if (nclasses >= MAX_CLASSES)
-                die(toks[i].line, "слишком много классов");
-            strncpy(class_name[nclasses], toks[i + 1].text, 63);
-            class_name[nclasses][63] = 0;
-            classes[nclasses].members = (unsigned int)nmembers;
-            classes[nclasses].nfields = 0;
-            classes[nclasses].nmethods = 0;
-            cls = nclasses++;
-            depth = 0;
+        if (toks[i].kind != T_NAME || strcmp(toks[i].text, "class") ||
+            toks[i + 1].kind != T_NAME)
             continue;
-        }
 
-        /* Поле: self.имя = ... внутри класса */
-        if (cls >= 0 && toks[i].kind == T_NAME &&
-            is_self_name(toks[i].text) &&
-            i + 3 < ntok &&
-            toks[i + 1].kind == T_OP && !strcmp(toks[i + 1].text, ".") &&
-            toks[i + 2].kind == T_NAME &&
-            toks[i + 3].kind == T_OP && !strcmp(toks[i + 3].text, "=")) {
-            if (find_field(cls, toks[i + 2].text) < 0) {
+        if (nclasses >= MAX_CLASSES)
+            die(toks[i].line, "слишком много классов");
+        strncpy(class_name[nclasses], toks[i + 1].text, 63);
+        class_name[nclasses][63] = 0;
+        classes[nclasses].members = (unsigned int)nmembers;
+        classes[nclasses].nfields = 0;
+        classes[nclasses].nmethods = 0;
+        cls = nclasses++;
+
+        /* Границы тела: от первого сдвига до парного ему возврата */
+        j = i + 2;
+        while (j < ntok && toks[j].kind != T_INDENT)
+            j++;
+        start = j;
+        depth = 0;
+        for (; j < ntok; j++) {
+            if (toks[j].kind == T_INDENT)
+                depth++;
+            else if (toks[j].kind == T_DEDENT) {
+                depth--;
+                if (depth <= 0)
+                    break;
+            }
+        }
+        end = j;
+
+        /* Сначала поля: self.имя = ... */
+        for (k = start; k + 3 < end; k++) {
+            if (toks[k].kind == T_NAME && is_self_name(toks[k].text) &&
+                toks[k + 1].kind == T_OP && !strcmp(toks[k + 1].text, ".") &&
+                toks[k + 2].kind == T_NAME &&
+                toks[k + 3].kind == T_OP && !strcmp(toks[k + 3].text, "=")) {
+                if (find_field(cls, toks[k + 2].text) >= 0)
+                    continue;
                 if (nmembers >= MAX_MEMBERS)
-                    die(toks[i].line, "слишком много полей");
-                /* Поля идут подряд, поэтому новое можно добавлять только
-                 * пока у класса нет ни одного метода. */
-                if (classes[cls].nmethods)
-                    die(toks[i].line,
-                        "поле появилось после метода: заведи его раньше");
-                strncpy(member_name[nmembers], toks[i + 2].text, 63);
+                    die(toks[k].line, "слишком много полей");
+                strncpy(member_name[nmembers], toks[k + 2].text, 63);
                 member_name[nmembers][63] = 0;
                 members[nmembers].value = classes[cls].nfields;
                 nmembers++;
                 classes[cls].nfields++;
             }
         }
+
+        /* Потом методы: они идут в таблице сразу за полями */
+        for (k = start; k + 1 < end; k++) {
+            int nargs = 0, m;
+
+            if (toks[k].kind != T_NAME || strcmp(toks[k].text, "def") ||
+                toks[k + 1].kind != T_NAME)
+                continue;
+
+            if (nfuncs >= MAX_FUNCS)
+                die(toks[k].line, "слишком много функций");
+            if (nmembers >= MAX_MEMBERS)
+                die(toks[k].line, "слишком много членов класса");
+
+            m = k + 2;
+            if (toks[m].kind == T_OP && !strcmp(toks[m].text, "(")) {
+                m++;
+                while (toks[m].kind == T_NAME) {
+                    nargs++;
+                    m++;
+                    if (toks[m].kind == T_OP && !strcmp(toks[m].text, ","))
+                        m++;
+                }
+            }
+
+            snprintf(func_name[nfuncs], 64, "%s.%s", class_name[cls],
+                     toks[k + 1].text);
+            funcs[nfuncs].nargs = (unsigned short)nargs;
+
+            strncpy(member_name[nmembers], toks[k + 1].text, 63);
+            member_name[nmembers][63] = 0;
+            members[nmembers].value = (unsigned int)nfuncs;
+            nmembers++;
+            classes[cls].nmethods++;
+            nfuncs++;
+        }
+
+        i = end;
     }
 }
 
+/*
+ * Обычные функции — те, что вне классов.
+ *
+ * Методы уже записаны при обходе классов, вместе со своими членами.
+ * Здесь мы их пропускаем: запиши их второй раз, и в таблице появятся
+ * двойники, а имя станет указывать на пустое тело.
+ */
 static void prescan_funcs(void)
 {
     int i, cls = -1, depth = 0;
-
-    /* Нулевая функция — сама программа: тело верхнего уровня */
-    strcpy(func_name[0], "");
-    nfuncs = 1;
 
     for (i = 0; i + 1 < ntok; i++) {
         if (toks[i].kind == T_INDENT && cls >= 0) {
@@ -1179,25 +1245,11 @@ static void prescan_funcs(void)
                         j++;
                 }
             }
-            if (cls >= 0) {
-                /*
-                 * Метод. Имя составное — «Класс.метод», — иначе два
-                 * класса с методом «нарисовать» столкнулись бы в общей
-                 * таблице функций.
-                 */
-                if (nmembers >= MAX_MEMBERS)
-                    die(toks[i].line, "слишком много членов класса");
-                snprintf(func_name[nfuncs], 64, "%s.%s",
-                         class_name[cls], toks[i + 1].text);
-                strncpy(member_name[nmembers], toks[i + 1].text, 63);
-                member_name[nmembers][63] = 0;
-                members[nmembers].value = (unsigned int)nfuncs;
-                nmembers++;
-                classes[cls].nmethods++;
-            } else {
-                strncpy(func_name[nfuncs], toks[i + 1].text, 63);
-                func_name[nfuncs][63] = 0;
-            }
+            if (cls >= 0)
+                continue;               /* метод уже записан выше */
+
+            strncpy(func_name[nfuncs], toks[i + 1].text, 63);
+            func_name[nfuncs][63] = 0;
             funcs[nfuncs].nargs = (unsigned short)nargs;
             nfuncs++;
         }
@@ -1345,6 +1397,120 @@ static unsigned int checksum(const unsigned char *p, int n)
     return s;
 }
 
+/* --- Подключение библиотек ------------------------------------------
+ *
+ * «use qt2» в начале файла подставляет сюда текст hittis/lib/qt2.ht.
+ *
+ * Подстановка текстом, а не отдельными единицами перевода. Это выбор, и
+ * у него есть цена: имена в библиотеке и в программе живут в одном
+ * пространстве, а номера строк в сообщениях об ошибках считаются по
+ * склеенному тексту, а не по исходному файлу.
+ *
+ * Взамен — отсутствие целого механизма: ни таблиц имён по файлам, ни
+ * правил видимости, ни порядка сборки. Для языка, у которого весь
+ * компилятор тысяча строк, второй такой механизм стоил бы дороже, чем
+ * приносит. Когда библиотек станет много и имена начнут сталкиваться,
+ * это и будет поводом сделать по-настоящему.
+ */
+static char *read_all(const char *path, long *size_out)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf;
+    long size;
+
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc((size_t)size + 1);
+    if (!buf || fread(buf, 1, (size_t)size, f) != (size_t)size) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    buf[size] = 0;
+    fclose(f);
+    if (size_out)
+        *size_out = size;
+    return buf;
+}
+
+/*
+ * Развернуть «use» в тексте. Возвращает новый текст.
+ *
+ * Глубина ограничена: библиотека вправе подключить другую, но кольцо из
+ * подключений должно кончиться жалобой, а не бесконечной подстановкой.
+ */
+static char *expand_uses(char *text, const char *libdir, int depth)
+{
+    char *out = malloc(1);
+    size_t n = 0;
+    const char *p = text;
+
+    if (depth > 8) {
+        fprintf(stderr, "hittis: слишком глубокая цепочка use\n");
+        exit(1);
+    }
+    out[0] = 0;
+
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) + 1 : strlen(p);
+        const char *q = p;
+        char name[64];
+        int k = 0;
+
+        while (*q == ' ' || *q == '\t')
+            q++;
+
+        if (!strncmp(q, "use ", 4)) {
+            char path[512];
+            char *lib;
+
+            q += 4;
+            while (*q == ' ')
+                q++;
+            while (*q && *q != '\n' && *q != '\r' && *q != ' ' &&
+                   k + 1 < (int)sizeof(name))
+                name[k++] = *q++;
+            name[k] = 0;
+
+            snprintf(path, sizeof(path), "%s/lib/%s.ht", libdir, name);
+            lib = read_all(path, NULL);
+            if (!lib) {
+                fprintf(stderr, "hittis: нет библиотеки %s (искал %s)\n",
+                        name, path);
+                exit(1);
+            }
+            lib = expand_uses(lib, libdir, depth + 1);
+
+            {
+                size_t add = strlen(lib);
+
+                out = realloc(out, n + add + 2);
+                memcpy(out + n, lib, add);
+                n += add;
+                out[n++] = '\n';
+                out[n] = 0;
+            }
+            free(lib);
+        } else {
+            out = realloc(out, n + len + 1);
+            memcpy(out + n, p, len);
+            n += len;
+            out[n] = 0;
+        }
+
+        if (!eol)
+            break;
+        p = eol + 1;
+    }
+
+    free(text);
+    return out;
+}
+
 int main(int argc, char **argv)
 {
     FILE *f;
@@ -1361,21 +1527,31 @@ int main(int argc, char **argv)
     in = argv[1];
     out = argv[2];
 
-    f = fopen(in, "rb");
-    if (!f) {
+    buf = read_all(in, &size);
+    if (!buf) {
         fprintf(stderr, "hittis: не открыть %s\n", in);
         return 1;
     }
-    fseek(f, 0, SEEK_END);
-    size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    buf = malloc(size + 1);
-    if (!buf || fread(buf, 1, size, f) != (size_t)size) {
-        fprintf(stderr, "hittis: не прочитать %s\n", in);
-        return 1;
+
+    /*
+     * Библиотеки ищем рядом с самим компилятором: он лежит в hittis/,
+     * значит и lib/ там же. Привязываться к текущей папке нельзя —
+     * собирают приложения из корня проекта, а зовут компилятор по пути.
+     */
+    {
+        char libdir[512];
+        char *slash;
+
+        snprintf(libdir, sizeof(libdir), "%s", argv[0]);
+        slash = strrchr(libdir, '/');
+        if (slash)
+            *slash = 0;
+        else
+            snprintf(libdir, sizeof(libdir), ".");
+
+        buf = expand_uses(buf, libdir, 0);
+        size = (long)strlen(buf);
     }
-    buf[size] = 0;
-    fclose(f);
 
     src = buf;
     srclen = (int)size;

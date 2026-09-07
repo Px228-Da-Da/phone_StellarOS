@@ -1,0 +1,23 @@
+{
+  "app": {
+    "id": "os.stellar.ui",
+    "name": "UI",
+    "version": "1.0.0",
+    "description": "Counter built with the qt2 library",
+    "author": "StellarOS",
+    "logo": "logo.png",
+    "start_app_logo": "logo.png",
+    "entry": "main.ht"
+  },
+  "display": {
+    "orientation": "portrait",
+    "theme_color": "#101218",
+    "background_color": "#101218",
+    "fullscreen": true
+  },
+  "permissions": [],
+  "settings": {
+    "language": "en",
+    "debug": false
+  }
+}
