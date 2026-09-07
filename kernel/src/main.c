@@ -12,6 +12,7 @@
 #include "font.h"
 #include "splash.h"
 #include "appload.h"
+#include "mdp.h"
 #include "uiarea.h"
 #include "battery.h"
 #include "window.h"
@@ -1784,6 +1785,9 @@ static void heartbeat_task(void *arg)
         kprintf("         ПРОВОД: ПАКЕТОВ %u, БАЙТ %u, ПОТЕРЯНО %u\n",
                 usb_rx_packets(), usb_rx_bytes(), usb_rx_lost());
         usb_report();
+
+        /* Разведка двумерного движка: один раз, когда консоль уже есть */
+        mdp_probe();
 
         /*
          * Батарея — в каждом пульсе.
