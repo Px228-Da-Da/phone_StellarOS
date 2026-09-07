@@ -196,6 +196,8 @@ static void appload_task(void *arg)
             worked = 1;
         }
 
+        usb_report();   /* показания шины печатаем отсюда, вне замка */
+
         if (fresh) {
             fresh = 0;
             /*

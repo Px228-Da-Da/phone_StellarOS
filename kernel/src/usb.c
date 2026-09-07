@@ -405,6 +405,14 @@ static u8  ep0_addr_pending;
 static u64 ep0_addr_deadline;       /* когда можно применить адрес */
 static int usb_configured;
 
+/* Показания, снятые при перечислении. Печатает их не то место, где они
+ * сняты: там держится замок USB, а печать идёт по USB же. */
+static struct {
+    int ready;
+    u8  cfg, power, txsz, rxsz;
+    u16 txmaxp, txcsr, rxmaxp, rxcsr, txadd, rxadd, intrtxe, intrrxe;
+} dump;
+
 /*
  * Открыт ли порт на той стороне.
  *
@@ -508,45 +516,34 @@ static void bulk_setup(void)
     /*
      * Что на самом деле получилось.
      *
-     * До точки не доходило ни байта, и обе догадки — про двойной сброс и
-     * про размер пакета — проверить иначе нечем. Спрашиваем сам
-     * контроллер: как он устроен (распределяются очереди вручную или
-     * нет), какого размера очередь у нашей точки и что в её регистрах
-     * после настройки. Печатается один раз, при перечислении.
+     * Снимаем показания, но НЕ печатаем: сюда мы попали из обслуживания
+     * нулевой точки, а оно работает под замком USB. Консоль же идёт по
+     * тому же USB и берёт тот же замок — печать отсюда останавливает
+     * ядро намертво, ровно в мгновение перечисления, то есть при каждой
+     * загрузке. Это не рассуждение, а опыт: первая же попытка так и
+     * повисла.
+     *
+     * Поэтому числа кладём в сторону, а печатает их отдельная задача,
+     * когда замок давно отпущен.
      */
-    {
-        u8  cfg;
-        u16 rxmaxp, rxcsr, txmaxp, txcsr;
-        u8  txsz, rxsz;
-        u16 txadd, rxadd;
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
+    dump.cfg    = mmio_read8(USB_BASE + MUSB_CONFIGDATA);
+    dump.power  = mmio_read8(USB_BASE + MUSB_POWER);
+    dump.intrtxe = mmio_read16(USB_BASE + MUSB_INTRTXE);
+    dump.intrrxe = mmio_read16(USB_BASE + MUSB_INTRRXE);
 
-        mmio_write8(USB_BASE + MUSB_INDEX, 0);
-        cfg = mmio_read8(USB_BASE + MUSB_CONFIGDATA);
+    mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+    dump.txmaxp = mmio_read16(USB_BASE + MUSB_TXMAXP);
+    dump.txcsr  = mmio_read16(USB_BASE + MUSB_TXCSR);
+    dump.rxmaxp = mmio_read16(USB_BASE + MUSB_RXMAXP);
+    dump.rxcsr  = mmio_read16(USB_BASE + MUSB_RXCSR);
+    dump.txsz   = mmio_read8(USB_BASE + MUSB_TXFIFOSZ);
+    dump.rxsz   = mmio_read8(USB_BASE + MUSB_RXFIFOSZ);
+    dump.txadd  = mmio_read16(USB_BASE + MUSB_TXFIFOADD);
+    dump.rxadd  = mmio_read16(USB_BASE + MUSB_RXFIFOADD);
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
 
-        mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
-        txmaxp = mmio_read16(USB_BASE + MUSB_TXMAXP);
-        txcsr  = mmio_read16(USB_BASE + MUSB_TXCSR);
-        rxmaxp = mmio_read16(USB_BASE + MUSB_RXMAXP);
-        rxcsr  = mmio_read16(USB_BASE + MUSB_RXCSR);
-        txsz   = mmio_read8(USB_BASE + MUSB_TXFIFOSZ);
-        rxsz   = mmio_read8(USB_BASE + MUSB_RXFIFOSZ);
-        txadd  = mmio_read16(USB_BASE + MUSB_TXFIFOADD);
-        rxadd  = mmio_read16(USB_BASE + MUSB_RXFIFOADD);
-        mmio_write8(USB_BASE + MUSB_INDEX, 0);
-
-        kprintf("USB      : CONFIGDATA %02x%s, СКОРОСТЬ %s\n",
-                cfg, (cfg & CONFIGDATA_DYNFIFO) ? " (ОЧЕРЕДИ ВРУЧНУЮ)" : "",
-                (mmio_read8(USB_BASE + MUSB_POWER) & 0x10) ? "ВЫСОКАЯ"
-                                                          : "ПОЛНАЯ");
-        kprintf("USB      : ТОЧКА %u: TXMAXP %04x TXCSR %04x, "
-                "RXMAXP %04x RXCSR %04x\n",
-                EP_BULK, txmaxp, txcsr, rxmaxp, rxcsr);
-        kprintf("USB      : ОЧЕРЕДИ: TXSZ %02x ADD %04x, RXSZ %02x ADD %04x\n",
-                txsz, txadd, rxsz, rxadd);
-        kprintf("USB      : РАЗРЕШЕНИЯ: INTRTXE %04x INTRRXE %04x\n",
-                mmio_read16(USB_BASE + MUSB_INTRTXE),
-                mmio_read16(USB_BASE + MUSB_INTRRXE));
-    }
+    dump.ready = 1;
 }
 
 static const u8 val_one = 1;
@@ -753,6 +750,23 @@ int usb_recv(u8 *out)
 }
 
 u32 usb_rx_lost(void) { return rx_lost; }
+void usb_report(void)
+{
+    if (!dump.ready)
+        return;
+    dump.ready = 0;
+
+    kprintf("USB      : CONFIGDATA %02x%s, СКОРОСТЬ %s\n",
+            dump.cfg, (dump.cfg & CONFIGDATA_DYNFIFO) ? " (ОЧЕРЕДИ ВРУЧНУЮ)" : "",
+            (dump.power & 0x10) ? "ВЫСОКАЯ" : "ПОЛНАЯ");
+    kprintf("USB      : ТОЧКА %u: TXMAXP %04x TXCSR %04x, RXMAXP %04x RXCSR %04x\n",
+            EP_BULK, dump.txmaxp, dump.txcsr, dump.rxmaxp, dump.rxcsr);
+    kprintf("USB      : ОЧЕРЕДИ: TXSZ %02x ADD %04x, RXSZ %02x ADD %04x\n",
+            dump.txsz, dump.txadd, dump.rxsz, dump.rxadd);
+    kprintf("USB      : РАЗРЕШЕНИЯ: INTRTXE %04x INTRRXE %04x\n",
+            dump.intrtxe, dump.intrrxe);
+}
+
 u32 usb_rx_packets(void) { return rx_packets; }
 u32 usb_rx_bytes(void) { return rx_bytes; }
 
@@ -1014,4 +1028,5 @@ int  usb_recv(u8 *out) { (void)out; return 0; }
 u32  usb_rx_lost(void) { return 0; }
 u32  usb_rx_packets(void) { return 0; }
 u32  usb_rx_bytes(void) { return 0; }
+void usb_report(void) { }
 #endif
