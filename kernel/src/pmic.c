@@ -17,6 +17,7 @@
  */
 #include "pmic.h"
 #include "io.h"
+#include "spinlock.h"
 
 #if defined(BOARD_MERLIN)
 #include "soc/mt6768.h"
@@ -41,6 +42,26 @@
 
 #define PWRAP_VALID         (1U << 31)  /* ответ готов */
 
+/*
+ * Замок на всю шину PMIC.
+ *
+ * У контроллера одна пара регистров: в один кладут команду, из другого
+ * забирают ответ. Две команды, начатые одновременно с разных ядер,
+ * перемешиваются, и второе ядро забирает ответ на чужой запрос. Как это
+ * выглядит снаружи, написано ниже в pmic_read: ответ отстаёт ровно на
+ * один запрос, и вместо своего значения приходит предыдущее.
+ *
+ * Долгое время сюда ходила одна задача питания, и обходилось. Замок
+ * понадобился, когда часы на экране блокировки стали спрашивать время
+ * по нескольку раз в секунду — уже с другого ядра и вперемешку с
+ * замерами батареи.
+ *
+ * Прерывания на время обмена закрыты: внутри есть ожидание по счётчику
+ * времени, и вытеснение посреди транзакции оставило бы шину занятой
+ * чужой командой.
+ */
+static struct spinlock pmic_lock;
+
 static u32 pwrap_spins = 200000;
 
 void pmic_set_spins(u32 n) { pwrap_spins = n; }
@@ -58,7 +79,7 @@ void pmic_use_regs(u32 cmd, u32 rdata, u32 vldclr)
     reg_vldclr = vldclr;
 }
 
-int pmic_read(u32 reg, u16 *out)
+static int pmic_read_locked(u32 reg, u16 *out)
 {
     u64 wait;
 
@@ -95,7 +116,7 @@ int pmic_read(u32 reg, u16 *out)
     return 0;
 }
 
-int pmic_write(u32 reg, u16 val)
+static int pmic_write_locked(u32 reg, u16 val)
 {
     u64 wait;
 
@@ -125,7 +146,7 @@ u32 pmic_find_regs(u16 *id_out)
         u16 id = 0;
 
         pmic_use_regs(off, off + 4, off + 8);
-        if (pmic_read(MT6358_SWCID, &id) == 0 && id != 0 && id != 0xFFFF) {
+        if (pmic_read_locked(MT6358_SWCID, &id) == 0 && id != 0 && id != 0xFFFF) {
             pwrap_spins = saved;
             if (id_out)
                 *id_out = id;
@@ -135,6 +156,32 @@ u32 pmic_find_regs(u16 *id_out)
     pmic_use_regs(PWRAP_WACS2_CMD, PWRAP_WACS2_RDATA, PWRAP_WACS2_VLDCLR);
     pwrap_spins = saved;
     return 0;
+}
+
+/*
+ * Наружу выходят обёртки, берущие замок.
+ *
+ * Разделено на две части, потому что перебор каналов в pmic_find_regs
+ * ходит к шине сам: если бы обмен всегда брал замок, а перебор вызывал
+ * обмен, взять его пришлось бы дважды. Внутренние функции замка не
+ * трогают, внешние берут — и перебор пользуется внутренними.
+ */
+int pmic_read(u32 reg, u16 *out)
+{
+    u64 flags = spin_lock_irq(&pmic_lock);
+    int rc = pmic_read_locked(reg, out);
+
+    spin_unlock_irq(&pmic_lock, flags);
+    return rc;
+}
+
+int pmic_write(u32 reg, u16 val)
+{
+    u64 flags = spin_lock_irq(&pmic_lock);
+    int rc = pmic_write_locked(reg, val);
+
+    spin_unlock_irq(&pmic_lock, flags);
+    return rc;
 }
 
 #else   /* в эмуляторе PMIC нет */
