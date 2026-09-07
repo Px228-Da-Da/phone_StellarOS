@@ -96,10 +96,30 @@ class Button:
         self.down = 0xFF4C8DFF
         self.ink = 0xFFFFFFFF
         self.pressed = 0
+        # Подпись: размер и откуда её рисовать внутри кнопки.
+        #
+        # Смещения хранятся числами, а не считаются от длины подписи:
+        # измерить строку язык не умеет вовсе — у него нет ни длины
+        # строки, ни обращения к её буквам. Приложение длину знает, оно
+        # эту подпись и написало; для него есть center().
+        self.size = 4
+        self.left = 20
+        self.top = h / 2 - 16
         # Чем кнопку пометило приложение: свой номер, код, что угодно.
         # Библиотека в это значение не смотрит вовсе.
         self.tag = 0
         return 0
+
+    # Поставить подпись по центру. chars — сколько в ней букв.
+    #
+    # Глиф шириной примерно в четыре размера и такой же высоты: этого
+    # хватает, чтобы одно-два знака стояли ровно, а большего от кнопки
+    # обычно и не просят.
+    def center(self, chars, size):
+        self.size = size
+        self.left = self.w / 2 - chars * size * 2
+        self.top = self.h / 2 - size * 4
+        return self
 
     def paint(self, face, down, ink):
         self.face = face
@@ -116,7 +136,8 @@ class Button:
         if self.pressed:
             color = self.down
         rect(self.x, self.y, self.w, self.h, color)
-        text(self.x + 20, self.y + self.h / 2 - 16, 4, self.ink, self.caption)
+        text(self.x + self.left, self.y + self.top, self.size, self.ink,
+             self.caption)
         return 0
 
     def hit(self, px, py):

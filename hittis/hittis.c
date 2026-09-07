@@ -158,6 +158,19 @@ static void lex(void)
 {
     int stack[MAX_DEPTH];
     int depth = 0;
+    /*
+     * Сколько скобок открыто.
+     *
+     * Внутри незакрытых скобок перевод строки ничего не значит: вызов
+     * с длинным списком аргументов вправе занять две строки, и отступ
+     * этой второй строки — забота человека, а не языка. Пока скобка не
+     * закрыта, ни новой строки, ни сдвига мы не выдаём вовсе.
+     *
+     * Без этого библиотека упиралась в ширину строки: перенести вызов
+     * было нельзя, и приходилось либо втискивать, либо заводить лишнюю
+     * переменную ради переноса.
+     */
+    int open = 0;
 
     stack[0] = 0;
 
@@ -181,18 +194,21 @@ static void lex(void)
             continue;
         }
 
-        if (indent > stack[depth]) {
-            if (depth + 1 >= MAX_DEPTH)
-                die(sline, "слишком глубокая вложенность");
-            stack[++depth] = indent;
-            push_tok(T_INDENT, NULL, 0, 0);
+        /* Внутри скобок лестницу отступов не трогаем вовсе */
+        if (!open) {
+            if (indent > stack[depth]) {
+                if (depth + 1 >= MAX_DEPTH)
+                    die(sline, "слишком глубокая вложенность");
+                stack[++depth] = indent;
+                push_tok(T_INDENT, NULL, 0, 0);
+            }
+            while (indent < stack[depth]) {
+                depth--;
+                push_tok(T_DEDENT, NULL, 0, 0);
+            }
+            if (indent != stack[depth])
+                die(sline, "отступ не совпадает ни с одним из открытых");
         }
-        while (indent < stack[depth]) {
-            depth--;
-            push_tok(T_DEDENT, NULL, 0, 0);
-        }
-        if (indent != stack[depth])
-            die(sline, "отступ не совпадает ни с одним из открытых");
 
         /* Сама строка */
         while (spos < srclen && src[spos] != '\n') {
@@ -283,6 +299,12 @@ static void lex(void)
             if (strchr("+-*/%<>=(),:.[]", c)) {
                 char one[2] = { c, 0 };
 
+                if (c == '(' || c == '[')
+                    open++;
+                else if (c == ')' || c == ']')
+                    if (open > 0)
+                        open--;
+
                 push_tok(T_OP, one, 0, 0);
                 spos++;
                 continue;
@@ -292,7 +314,9 @@ next_char:
             ;
         }
 
-        push_tok(T_NEWLINE, NULL, 0, 0);
+        /* Внутри незакрытых скобок перевод строки — просто пробел */
+        if (!open)
+            push_tok(T_NEWLINE, NULL, 0, 0);
         if (spos < srclen) {
             spos++;
             sline++;
