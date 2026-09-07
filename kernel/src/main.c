@@ -2145,6 +2145,46 @@ void exception_fatal(u64 type, u64 esr, u64 elr, u64 far)
     kprintf("ESR  = %016lx  (EC=%lu)\n", esr, (esr >> 26) & 0x3F);
     kprintf("ELR  = %016lx\n", elr);
     kprintf("FAR  = %016lx\n", far);
+
+    /*
+     * Кто именно упал.
+     *
+     * Без этого паника сообщала только КУДА ушло управление, а этого
+     * мало: адрес вроде ffffffffffffffff не принадлежит никому и ничего
+     * не объясняет. Нужно обратное — откуда пришли.
+     *
+     * Печатаем ядро процессора, задачу на нём и обратный след: идём по
+     * стеку и выбираем значения, похожие на адреса внутри образа. Это не
+     * настоящая раскрутка стека — среди них попадутся и случайные
+     * совпадения, — но первые же несколько обычно и есть цепочка
+     * вызовов, а больше от аварийного отчёта не требуется.
+     */
+    {
+        extern char __image_start[], __image_end[];
+        u64 lo = (u64)(uintptr_t)__image_start;
+        u64 hi = (u64)(uintptr_t)__image_end;
+        u64 sp;
+        u32 shown = 0;
+
+        __asm__ volatile("mov %0, sp" : "=r"(sp));
+
+        kprintf("ЯДРО %u, ЗАДАЧА %s (%lu), SP = %016lx\n",
+                cpu_id(), task_name(), task_id(), sp);
+        kprintf("ОБРАЗ %016lx..%016lx\n", lo, hi);
+        kprintf("ОБРАТНЫЙ СЛЕД:\n");
+
+        for (u64 p = sp; p < sp + 4096 && shown < 12; p += 8) {
+            u64 v = *(volatile u64 *)(uintptr_t)p;
+
+            if (v >= lo && v < hi) {
+                kprintf("    %016lx  (+%lu)\n", v, v - lo);
+                shown++;
+            }
+        }
+        if (!shown)
+            kprintf("    ничего похожего на адрес в образе\n");
+    }
+
     kprintf("HALTED.\n");
 
     for (;;)
