@@ -167,6 +167,112 @@ static void peek(const struct block *b)
             b->name, v[0], v[1], v[2], v[3]);
 }
 
+/*
+ * Разводка экранной половины. Здесь она вся, поимённо.
+ *
+ * Взято из драйвера экрана вендора для этого самого чипа:
+ * drivers/misc/mediatek/video/mt6768/dispsys/ — смещения в
+ * ddp_reg_mmsys.h, а кто с кем соединяется — в ddp_path.c, таблицы
+ * mout_map[] и sel_in_map[]. Не с соседнего чипа и не по соглашению:
+ * ровно MT6768.
+ *
+ * Это то, чего не хватало движку. У двумерной половины значения
+ * мультиплексоров нигде не опубликованы, а у экранной — опубликованы
+ * целиком, и в ней есть ровно то, что нам нужно:
+ *
+ *     DISP_OVL0_MOUT_EN бит 2  → WDMA0
+ *     DISP_WDMA0_SEL_IN = 1    → берёт у OVL0
+ *
+ * То есть снимок того, что оверлей уже собрал, прямо в память. А
+ * MOUT_EN — маска, а не выбор: бит на RDMA0 можно оставить, и экран
+ * продолжит показывать, пока мы снимаем. Через RSZ0 (у него бит 4 на
+ * WDMA0) снимок можно сразу и уменьшить — это и есть заготовка для
+ * размытия, посчитанная железом.
+ *
+ * Но сначала читаем. Если карта верна, она обязана описать ту цепочку,
+ * которую построил загрузчик и которая прямо сейчас показывает картинку.
+ * Не опишет — значит понята неправильно, и трогать по ней ничего нельзя.
+ */
+static const char *const to_ovl0[]    = { "rdma0", "ovl0_2l", "wdma0", "rsz0", 0 };
+static const char *const to_ovl0_2l[] = { "rdma0", "wdma0", "rsz0", 0 };
+static const char *const to_rsz0[]    = { "rdma0", "ovl0", "ovl0_2l", "rsz0_virt1", "wdma0", 0 };
+static const char *const to_dither0[] = { "dsi0", "wdma0", 0 };
+
+static const char *const in_rdma0[]   = { "ovl0", "ovl0_2l", "rsz0", 0 };
+static const char *const in_rsz0[]    = { "ovl0", "ovl0_2l", "rdma0", 0 };
+static const char *const in_rsz0v1[]  = { "rsz0_virt0", "rsz0", 0 };
+static const char *const in_ccorr0[]  = { "color0", "rsz0_virt1", 0 };
+static const char *const in_dsi0[]    = { "rsz0_virt1", "dither0", 0 };
+static const char *const in_wdma0[]   = { "dither0", "ovl0", "ovl0_2l", "rsz0", 0 };
+static const char *const out_rdma0[]  = { "dsi0", "color0", "ccorr0", 0 };
+static const char *const out_rd_rsz[] = { "rsz0_virt0", "rsz0", 0 };
+
+struct route {
+    const char         *name;
+    u32                 off;
+    int                 is_mask;    /* 1 = маска получателей, 0 = номер источника */
+    const char *const  *who;
+};
+
+static const struct route routes[] = {
+    { "OVL0_MOUT_EN    ", 0xF3C, 1, to_ovl0    },
+    { "OVL0_2L_MOUT_EN ", 0xF40, 1, to_ovl0_2l },
+    { "RSZ0_MOUT_EN    ", 0xF44, 1, to_rsz0    },
+    { "DITHER0_MOUT_EN ", 0xF50, 1, to_dither0 },
+    { "RDMA0_RSZ0_SOUT ", 0xF48, 0, out_rd_rsz },
+    { "RDMA0_SOUT_SEL  ", 0xF4C, 0, out_rdma0  },
+    { "PATH0_SEL_IN    ", 0xF54, 0, in_rdma0   },
+    { "RSZ0_SEL_IN     ", 0xF58, 0, in_rsz0    },
+    { "RDMA0_RSZ0_SELIN", 0xF60, 0, in_rsz0v1  },
+    { "COLOR0_OUT_SELIN", 0xF64, 0, in_ccorr0  },
+    { "DSI0_SEL_IN     ", 0xF68, 0, in_dsi0    },
+    { "WDMA0_SEL_IN    ", 0xF6C, 0, in_wdma0   },
+};
+#define ROUTE_N (sizeof(routes) / sizeof(routes[0]))
+
+static void disp_routes(void)
+{
+    kprintf("MDP      : РАЗВОДКА ЭКРАНА (ПО КАРТЕ ВЕНДОРА ДЛЯ MT6768):\n");
+
+    for (unsigned i = 0; i < ROUTE_N; i++) {
+        u32 v = mmio_read32(MMSYS_BASE + routes[i].off);
+
+        if (routes[i].is_mask) {
+            kprintf("MDP      :   %s (%03x) %08x ОТДАЁТ:\n",
+                    routes[i].name, routes[i].off, v);
+            for (unsigned b = 0; routes[i].who[b]; b++)
+                if (v & (1U << b))
+                    kprintf("MDP      :       %s\n", routes[i].who[b]);
+            if (!v)
+                kprintf("MDP      :       НИКОМУ\n");
+        } else {
+            unsigned n = 0;
+
+            while (routes[i].who[n])
+                n++;
+            kprintf("MDP      :   %s (%03x) %08x БЕРЁТ У %s\n",
+                    routes[i].name, routes[i].off, v,
+                    v < n ? routes[i].who[v] : "??? (ВНЕ КАРТЫ)");
+        }
+    }
+
+    /*
+     * Сверка с работающим экраном.
+     *
+     * Картинку сейчас показывает цепочка, построенная загрузчиком, и
+     * начинается она с оверлея — это мы знаем твёрдо, потому что сами
+     * пишем в его слои и видим результат. Значит у OVL0 обязан стоять
+     * хоть один бит «кому отдавать». Не стоит — карта прочитана
+     * неправильно, и по ней нельзя ни снимать экран, ни что-то менять.
+     */
+    if (mmio_read32(MMSYS_BASE + 0xF3C))
+        kprintf("MDP      : СВЕРКА: OVL0 КОМУ-ТО ОТДАЁТ, КАК И ДОЛЖЕН\n");
+    else
+        kprintf("MDP      : СВЕРКА НЕ ПРОШЛА: OVL0 НИКОМУ НЕ ОТДАЁТ,\n"
+                "MDP      : А КАРТИНКА ИДЁТ. КАРТА НЕВЕРНА, ПО НЕЙ НЕ ДЕЙСТВУЮ.\n");
+    usb_flush();
+}
+
 void mdp_probe(void)
 {
     static int told;
@@ -176,6 +282,8 @@ void mdp_probe(void)
     if (told)
         return;
     told = 1;
+
+    disp_routes();
 
     cg = gates();
     kprintf("MDP      : ЗАТВОРЫ ТАКТОВ %08x (1 = СПИТ)\n", cg);
