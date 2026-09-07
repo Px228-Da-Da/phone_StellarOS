@@ -29,6 +29,8 @@
 #include "io.h"
 #include "print.h"
 #include "usb.h"
+#include "pmm.h"
+#include "sched.h"
 
 #if defined(BOARD_MERLIN)
 
@@ -206,6 +208,191 @@ static void disp_routes(void)
 }
 
 /*
+ * Снимок экрана в память через DISP_WDMA0.
+ *
+ * Всё, что здесь пишется, взято из драйвера экрана вендора для MT6768
+ * (out/ref/disp, разбор в docs/09). Ни одного числа наугад.
+ *
+ * Замысел. Оверлей уже собирает кадр и отдаёт его дальше по цепочке
+ * OVL0 → OVL0_2L → RDMA0 → DSI0 — это прочитано на телефоне. Регистр
+ * OVL0_MOUT_EN не выбирает получателя, а разрешает: это маска. Значит
+ * можно добавить второго получателя, не отняв первого, — и WDMA0 положит
+ * тот же кадр в память, пока панель продолжает его показывать.
+ *
+ * Риск и как он закрыт. Связь между блоками — рукопожатие: если WDMA0
+ * не готов принимать, оверлей может встать в ожидании согласия, и экран
+ * замрёт. Поэтому, во-первых, WDMA0 настраивается и включается ДО того,
+ * как ему что-то пошлют. Во-вторых, окно риска закрывается само:
+ * подключение живёт пятьдесят миллисекунд — три кадра при шестидесяти
+ * герцах, — после чего маска возвращается к прежнему значению
+ * безусловно, вышло что-нибудь или нет. Даже если предположение неверно,
+ * экран замрёт на три кадра и оживёт.
+ *
+ * Снимаем не весь экран, а квадрат 256x256: этого хватает, чтобы
+ * доказать, что кадр доходит, а буфер выходит на четверть мегабайта
+ * вместо десяти.
+ */
+
+/* Регистры DISP_WDMA0 — ddp_reg_dma.h вендора */
+#define WDMA0_BASE          0x1400E000UL
+#define WDMA_INTSTA         0x004
+#define WDMA_EN             0x008
+#define WDMA_RST            0x00C
+#define WDMA_CFG            0x014
+#define WDMA_SRC_SIZE       0x018
+#define WDMA_CLIP_SIZE      0x01C
+#define WDMA_CLIP_COORD     0x020
+#define WDMA_DST_W_IN_BYTE  0x028
+#define WDMA_ALPHA          0x02C
+#define WDMA_FLOW_CTRL_DBG  0x0A0
+#define WDMA_DST_ADDR0      0xF00
+
+/* Разводка экрана — ddp_reg_mmsys.h вендора */
+#define DISP_OVL0_MOUT_EN   0xF3C
+#define DISP_WDMA0_SEL_IN   0xF6C
+#define OVL0_MOUT_TO_WDMA0  (1U << 2)   /* mout_map[0]: третий получатель */
+#define WDMA0_SEL_IN_OVL0   1           /* sel_in_map[5]: второй источник */
+
+#define WDMA0_GATE          11          /* затвор тактов disp_wdma0 */
+
+/*
+ * Формат.
+ *
+ * Наш пиксель — 0xAARRGGBB в слове, то есть в памяти байтами B, G, R, A.
+ * По enum UNIFIED_COLOR_FMT из ddp_info.h это UFMT_BGRA8888: код формата
+ * 2, своп 0. Ровно то, что мы сами пишем в L_CON оверлея, и это лишняя
+ * проверка, что формат понят правильно.
+ *
+ * CFG: OUT_FORMAT в битах [7:4], своп бит 16, CT_EN бит 11 (для RGB не
+ * нужен), EXT_MTX_EN бит 13.
+ */
+#define WDMA_CFG_BGRA8888   (2U << 4)
+
+#define SNAP_W  256
+#define SNAP_H  256
+#define SNAP_X  100         /* внутри рабочей области, там есть что снимать */
+#define SNAP_Y  300
+
+static u32 *snap_buf;
+
+static void snap_report(const char *when)
+{
+    kprintf("MDP      : WDMA0 %s: EN %08x CFG %08x SRC %08x CLIP %08x\n",
+            when,
+            mmio_read32(WDMA0_BASE + WDMA_EN),
+            mmio_read32(WDMA0_BASE + WDMA_CFG),
+            mmio_read32(WDMA0_BASE + WDMA_SRC_SIZE),
+            mmio_read32(WDMA0_BASE + WDMA_CLIP_SIZE));
+    kprintf("MDP      :       АДРЕС %08x ШАГ %08x СОСТ %08x ПОТОК %08x\n",
+            mmio_read32(WDMA0_BASE + WDMA_DST_ADDR0),
+            mmio_read32(WDMA0_BASE + WDMA_DST_W_IN_BYTE),
+            mmio_read32(WDMA0_BASE + WDMA_INTSTA),
+            mmio_read32(WDMA0_BASE + WDMA_FLOW_CTRL_DBG));
+    usb_flush();
+}
+
+static void snapshot(void)
+{
+    u32 cg, mout_was, sel_was;
+    u32 nonzero = 0;
+    u32 i;
+
+    if (!snap_buf) {
+        snap_buf = (u32 *)pmm_alloc_dma(SNAP_W * SNAP_H * 4);
+        if (!snap_buf) {
+            kprintf("MDP      : СНИМОК: НЕ ХВАТИЛО ПАМЯТИ\n");
+            return;
+        }
+    }
+
+    /* Заполняем узнаваемым мусором: если после снимка он останется,
+     * значит железо в буфер не писало вовсе, и это видно сразу. */
+    for (i = 0; i < SNAP_W * SNAP_H; i++)
+        snap_buf[i] = 0xDEADBEEF;
+
+    kprintf("MDP      : СНИМОК ЭКРАНА %dx%d ИЗ (%d,%d) В 0x%08lx\n",
+            SNAP_W, SNAP_H, SNAP_X, SNAP_Y, (u64)snap_buf);
+
+    /* 1. Такты. Без них обращение к блоку повесит шину. */
+    cg = gates();
+    if (cg & (1U << WDMA0_GATE)) {
+        mmio_write32(MMSYS_BASE + MMSYS_CG_CLR0, 1U << WDMA0_GATE);
+        cg = gates();
+        kprintf("MDP      : РАЗБУДИЛ disp_wdma0, ЗАТВОРЫ %08x\n", cg);
+    }
+    if (cg & (1U << WDMA0_GATE)) {
+        kprintf("MDP      : disp_wdma0 НЕ ПРОСНУЛСЯ, ДАЛЬШЕ НЕ ИДУ\n");
+        usb_flush();
+        return;
+    }
+    usb_flush();
+
+    /* 2. Сброс: приводим блок в известное состояние */
+    mmio_write32(WDMA0_BASE + WDMA_RST, 1);
+    (void)mmio_read32(WDMA0_BASE + WDMA_RST);
+    mmio_write32(WDMA0_BASE + WDMA_RST, 0);
+
+    /* 3. Настройка. Порядок и поля — как в wdma_config() вендора. */
+    mmio_write32(WDMA0_BASE + WDMA_SRC_SIZE,  (2340U << 16) | 1080U);
+    mmio_write32(WDMA0_BASE + WDMA_CLIP_COORD, (SNAP_Y << 16) | SNAP_X);
+    mmio_write32(WDMA0_BASE + WDMA_CLIP_SIZE,  (SNAP_H << 16) | SNAP_W);
+    mmio_write32(WDMA0_BASE + WDMA_CFG,        WDMA_CFG_BGRA8888);
+    mmio_write32(WDMA0_BASE + WDMA_DST_ADDR0,  (u32)(u64)snap_buf);
+    mmio_write32(WDMA0_BASE + WDMA_DST_W_IN_BYTE, SNAP_W * 4);
+    mmio_write32(WDMA0_BASE + WDMA_ALPHA,      (1U << 31) | 0xFF);
+    mmio_write32(WDMA0_BASE + WDMA_INTSTA,     0);   /* сбросить признаки */
+
+    /* 4. Включаем приёмник ДО того, как ему что-то пошлют */
+    mmio_write32(WDMA0_BASE + WDMA_EN, 1);
+    snap_report("НАСТРОЕН");
+
+    /*
+     * 5. Подключаем на три кадра.
+     *
+     * Маска, а не выбор: прежний получатель остаётся, экран продолжает
+     * показывать. Возврат безусловный — что бы ни вышло, через пятьдесят
+     * миллисекунд всё как было.
+     */
+    mout_was = mmio_read32(MMSYS_BASE + DISP_OVL0_MOUT_EN);
+    sel_was  = mmio_read32(MMSYS_BASE + DISP_WDMA0_SEL_IN);
+
+    mmio_write32(MMSYS_BASE + DISP_WDMA0_SEL_IN, WDMA0_SEL_IN_OVL0);
+    mmio_write32(MMSYS_BASE + DISP_OVL0_MOUT_EN, mout_was | OVL0_MOUT_TO_WDMA0);
+    kprintf("MDP      : ПОДКЛЮЧИЛ: MOUT %08x -> %08x, SEL_IN %08x -> %d\n",
+            mout_was, mout_was | OVL0_MOUT_TO_WDMA0, sel_was, WDMA0_SEL_IN_OVL0);
+    usb_flush();
+
+    task_sleep_ms(50);
+
+    mmio_write32(MMSYS_BASE + DISP_OVL0_MOUT_EN, mout_was);
+    mmio_write32(MMSYS_BASE + DISP_WDMA0_SEL_IN, sel_was);
+    snap_report("ПОСЛЕ   ");
+    mmio_write32(WDMA0_BASE + WDMA_EN, 0);
+
+    kprintf("MDP      : ОТКЛЮЧИЛ, MOUT ВЕРНУЛСЯ В %08x\n",
+            mmio_read32(MMSYS_BASE + DISP_OVL0_MOUT_EN));
+
+    /* 6. Что в буфере */
+    for (i = 0; i < SNAP_W * SNAP_H; i++)
+        if (snap_buf[i] != 0xDEADBEEF)
+            nonzero++;
+
+    kprintf("MDP      : СЛОВ ИЗМЕНИЛОСЬ %u ИЗ %u\n",
+            nonzero, SNAP_W * SNAP_H);
+    kprintf("MDP      : ПЕРВЫЕ СЛОВА: %08x %08x %08x %08x\n",
+            snap_buf[0], snap_buf[1], snap_buf[2], snap_buf[3]);
+    kprintf("MDP      : СЕРЕДИНА:     %08x %08x %08x %08x\n",
+            snap_buf[SNAP_W * SNAP_H / 2 + 0], snap_buf[SNAP_W * SNAP_H / 2 + 1],
+            snap_buf[SNAP_W * SNAP_H / 2 + 2], snap_buf[SNAP_W * SNAP_H / 2 + 3]);
+
+    if (nonzero)
+        kprintf("MDP      : СНИМОК ПОЛУЧИЛСЯ\n");
+    else
+        kprintf("MDP      : БУФЕР НЕ ТРОНУТ — КАДР ДО WDMA0 НЕ ДОШЁЛ\n");
+    usb_flush();
+}
+
+/*
  * Отчёт печатается трижды, а не один раз.
  *
  * Один раз мы уже пробовали, и он не дошёл: разведка идёт на десятой
@@ -238,6 +425,11 @@ void mdp_probe(void)
     beats++;
     if (beats < 6 || beats > 8)
         return;
+
+    if (beats == 7) {           /* снимок один раз, в середине окна */
+        snapshot();
+        return;
+    }
 
     disp_routes();
 
