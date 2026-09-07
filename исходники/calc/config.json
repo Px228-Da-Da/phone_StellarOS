@@ -1,0 +1,27 @@
+{
+  "app": {
+    "id": "com.example.myapp",
+    "name": "Название приложения",
+    "version": "1.0.0",
+    "description": "Краткое описание приложения",
+    "author": "Ваше имя или компания",
+    "logo": "logo.png",
+    "start_app_logo": "logo.png",
+    "entry": "main.ht"
+  },
+  "display": {
+    "orientation": "portrait",
+    "theme_color": "#000000",
+    "background_color": "#ffffff",
+    "fullscreen": true
+  },
+  "permissions": [
+    "camera",
+    "storage",
+    "internet"
+  ],
+  "settings": {
+    "language": "ru",
+    "debug": false
+  }
+}

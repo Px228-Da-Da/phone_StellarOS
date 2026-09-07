@@ -40,10 +40,11 @@ manrope.stf: ../tools/fontgen.c ../fonts/Manrope-SemiBold.ttf
 
 # Собрать и тут же прогнать все исходники
 check: hittis hostrun
-	@for f in ../исходники/*.ht; do \
-		echo "--- $$f"; \
-		./hittis $$f /tmp/`basename $$f .ht`.slt >/dev/null || exit 1; \
-		./hostrun /tmp/`basename $$f .ht`.slt || exit 1; \
+	@for d in ../исходники/*/; do \
+		n=`basename $$d`; \
+		echo "--- $$n"; \
+		./hittis $$d/main.ht /tmp/$$n.slt >/dev/null || exit 1; \
+		./hostrun /tmp/$$n.slt || exit 1; \
 	done
 
 clean:

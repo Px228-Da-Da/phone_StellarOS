@@ -2,12 +2,13 @@
 rem ============================================================
 rem  ht - prilozheniya Hittis.
 rem
-rem    ht ide   [ishodniki\demo.ht]  sreda razrabotki v brauzere
-rem    ht send  ishodniki\demo.ht    otpravit v telefon po provodu
-rem    ht run   ishodniki\demo.ht    okno na kompyutere, mysh kak palets
+rem    ht ide   [calc]   sreda razrabotki v brauzere
+rem    ht send  calc     otpravit v telefon po provodu
+rem    ht run   calc     okno na kompyutere, mysh kak palets
 rem
-rem  Dve papki: v ishodniki/ tekst na Hittis, v apps/ gotovye .slt.
-rem  Sistema chitaet tolko apps/ i nichego ne kompiliruet.
+rem  Prilozhenie - eto papka: ishodniki/calc s config.json, main.ht i
+rem  kartinkami. Gotovoe lozhitsya v apps/calc.slt, i sistema chitaet
+rem  tolko ego.
 rem    ht build apps\demo.ht    sobrat .slt ryadom s ishodnikom
 rem    ht shot  apps\demo.ht    snyat pervyy kadr v kartinku
 rem    ht check                 progon vseh prilozheniy iz apps
@@ -24,7 +25,7 @@ rem     Posledovatelnyy port telefona viden tolko iz Windows, a
 rem     kompilyator zhivet v WSL - poetomu komanda iz dvuh polovin.
 if /i "%~1"=="send" (
     if "%APP%"=="" (
-        echo ukazhi prilozhenie: ht send ishodniki\demo.ht
+        echo ukazhi prilozhenie: ht send calc
         goto :eof
     )
     wsl -e sh -lc "/mnt/d/OS_ANDROID/tools/ht.sh build '%APP%'"

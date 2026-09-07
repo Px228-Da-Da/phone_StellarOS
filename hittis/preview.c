@@ -167,7 +167,7 @@ static int         port = 8080;
 static int  listen_fd = -1;
 static int  ide_mode;                   /* показывать редактор, а не один кадр */
 static int  reopened;                   /* это перезапуск, а не первый пуск    */
-static char apps_dir[512] = "apps";     /* где искать .ht                      */
+static char apps_dir[512] = ".";        /* корень: там лежат папки приложений  */
 static char build_dir[512] = ".";       /* где лежит компилятор                */
 static char compile_err[4096];          /* что сказал компилятор в прошлый раз */
 static int  compile_ok;                 /* и чем это кончилось                 */
@@ -404,17 +404,65 @@ static int name_ok(const char *f)
     for (const char *p = f; *p; p++)
         if (*p == '/' || *p == '\\' || *p == ':')
             return 0;
-    if (strstr(f, ".."))
-        return 0;
-    return strstr(f, ".ht") != NULL;
+    return strstr(f, "..") == NULL;
+}
+
+static char *text_read(const char *path, size_t *len);  /* определена ниже */
+
+/*
+ * Точка входа приложения.
+ *
+ * Приложение — папка с манифестом, и чем его открывать, написано там же,
+ * в поле «entry». Настоящего разбора json здесь нет и не нужно: ищем имя
+ * поля и берём строку в кавычках следом. Это сканер, а не разборщик, и
+ * он честно ошибётся на хитром файле — но манифест пишет человек, а не
+ * машина, и хитрым он не бывает. Не нашли — main.ht, как в примере.
+ */
+static void entry_of(char *out, size_t max, const char *name)
+{
+    char cfg[1400];
+    char *txt;
+    char ent[128];
+    size_t n = 0;
+
+    snprintf(cfg, sizeof(cfg), "%s/%s/config.json", apps_dir, name);
+    txt = text_read(cfg, NULL);
+    ent[0] = 0;
+
+    if (txt) {
+        const char *p = strstr(txt, "entry");
+
+        if (p) {
+            p = strchr(p + 5, ':');
+            if (p)
+                p = strchr(p, '"');
+            if (p) {
+                p++;
+                while (*p && *p != '"' && n + 1 < sizeof(ent))
+                    ent[n++] = *p++;
+            }
+        }
+        ent[n] = 0;
+        free(txt);
+    }
+
+    if (!ent[0])
+        snprintf(ent, sizeof(ent), "main.ht");
+    snprintf(out, max, "%s/%s/%s", apps_dir, name, ent);
 }
 
 static void app_path(char *out, size_t max, const char *name)
 {
-    snprintf(out, max, "%s/%s", apps_dir, name);
+    entry_of(out, max, name);
 }
 
-/* Список приложений одной строкой: имена через перевод строки */
+/*
+ * Список приложений: имена папок через перевод строки.
+ *
+ * Папкой, а не файлом: приложение это папка с манифестом, точкой входа
+ * и картинками. Отличаем по наличию манифеста — так в список не попадёт
+ * ни icons, ни что бы там ещё ни лежало рядом.
+ */
 static void files_list(char *out, size_t max)
 {
     DIR *d = opendir(apps_dir);
@@ -426,8 +474,13 @@ static void files_list(char *out, size_t max)
         return;
     while ((e = readdir(d)) != NULL) {
         size_t k;
+        char cfg[1400];
+        struct stat st;
 
         if (!name_ok(e->d_name))
+            continue;
+        snprintf(cfg, sizeof(cfg), "%s/%s/config.json", apps_dir, e->d_name);
+        if (stat(cfg, &st) != 0)
             continue;
         k = strlen(e->d_name);
         if (n + k + 2 >= max)
@@ -677,12 +730,20 @@ static void serve_one(int fd)
     } else if (route(req, "GET /now")) {
         /* Какой файл сейчас открыт машиной: браузер должен знать, что
          * показывает телефон справа, а не гадать по имени приложения. */
+        char who[256];
         const char *p = src_path ? src_path : "";
         const char *slash = strrchr(p, '/');
+        const char *prev = who;
 
-        if (slash)
-            p = slash + 1;
-        reply(fd, "text/plain; charset=utf-8", p, strlen(p));
+        snprintf(who, sizeof(who), "%s", p);
+        if (slash) {
+            char *cut = who + (slash - p);
+
+            *cut = 0;                       /* отрезали точку входа */
+            slash = strrchr(who, '/');
+            prev = slash ? slash + 1 : who; /* осталось имя папки   */
+        }
+        reply(fd, "text/plain; charset=utf-8", prev, strlen(prev));
 
     } else if (route(req, "POST /save")) {
         const char *body = strstr(req, "\r\n\r\n");
@@ -1109,6 +1170,8 @@ int main(int argc, char **argv)
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--ide") == 0)
             ide_mode = 1;
+        if (strcmp(argv[i], "--корень") == 0 && i + 1 < argc)
+            snprintf(apps_dir, sizeof(apps_dir), "%s", argv[++i]);
         if (strcmp(argv[i], "--снова") == 0)
             reopened = 1;
     }
@@ -1125,17 +1188,6 @@ int main(int argc, char **argv)
     }
 
     snprintf(build_dir, sizeof(build_dir), "%s", dir);
-    {
-        /* Папка приложений — та, где лежит открытый файл. Список слева
-         * должен показывать соседей по папке, а не гадать по имени. */
-        const char *slash = strrchr(path, '/');
-
-        if (slash && (size_t)(slash - path) < sizeof(apps_dir))
-            snprintf(apps_dir, sizeof(apps_dir), "%.*s",
-                     (int)(slash - path), path);
-        else
-            snprintf(apps_dir, sizeof(apps_dir), ".");
-    }
 
     if (strstr(path, ".ht")) {
         src_path = path;

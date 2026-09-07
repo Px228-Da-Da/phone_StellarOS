@@ -156,13 +156,13 @@ $(BUILD)/host/bin2c: $(HITTIS)/bin2c.c
 # два разных дела в одном действии. Теперь они разделены: исходники
 # лежат в исходники/ и превращаются в приложения командой ht build,
 # а система читает только готовое.
-$(BUILD)/user/app_slt.h: ../apps/demo.slt $(BUILD)/host/bin2c | $(BUILD)/user
+$(BUILD)/user/app_slt.h: ../apps/calc.slt $(BUILD)/host/bin2c | $(BUILD)/user
 	$(BUILD)/host/bin2c $< app_slt > $@
 
 # Нет готового приложения — говорим об этом прямо, а не молчим об
 # отсутствующем файле языком make.
-../apps/demo.slt:
-	@echo "нет apps/demo.slt — собери его: ht build исходники/demo.ht"; false
+../apps/calc.slt:
+	@echo "нет apps/calc.slt — собери его: ht build calc"; false
 
 # Исполнитель — единственная программа из двух исходников: свой и машина
 # из ../hittis. Поэтому у него отдельное правило, а не общее по шаблону.
