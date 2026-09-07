@@ -4,24 +4,24 @@
 # а строки существуют как готовые постоянные — их можно напечатать или
 # вывести на экран.
 
-app "ПРИВЕТ"
+app "HELLO"
 
-def сумма(a, b):
+def sum(a, b):
     return a + b
 
-print("HITTIS: ЗДРАВСТВУЙ, StellarOS")
+print("HITTIS: HELLO, StellarOS")
 
 x = 2
 y = 40
-printn(сумма(x, y))
+printn(sum(x, y))
 
 i = 0
 while i < 3:
-    print("HITTIS: КРУГ")
+    print("HITTIS: ROUND")
     printn(i)
     i = i + 1
 
-if сумма(1, 1) == 2:
-    print("HITTIS: СЧЁТ СХОДИТСЯ")
+if sum(1, 1) == 2:
+    print("HITTIS: NUMBERS AGREE")
 else:
-    print("HITTIS: ЧТО-ТО НЕ ТАК")
+    print("HITTIS: SOMETHING IS WRONG")

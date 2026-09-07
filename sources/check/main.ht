@@ -1,0 +1,80 @@
+# Проверка языка Hittis.
+#
+# Не приложение, а список утверждений из docs/07-hittis-language.md,
+# каждое из которых проверяется на компьютере:
+#
+#     hittis/hittis apps/проверка.ht /tmp/п.slt && hittis/hostrun /tmp/п.slt
+#
+# Печатает по строке на утверждение. Любое «НЕ СХОДИТСЯ» значит, что
+# справочник разошёлся с языком, и чинить надо одно из двух.
+
+app "CHECK" 0 0
+
+color = 0xFF4C8DFF       # шестнадцатеричное число
+limit = 100
+
+def check(unnamed, result, expected):
+    if result == expected:
+        print("СХОДИТСЯ")
+    else:
+        print("НЕ СХОДИТСЯ:")
+        printn(result)
+    return 0
+
+# Функцию можно звать раньше, чем она определена
+def later(x):
+    return x * 2
+
+def globalStaysPut():
+    limit = 7           # заводит МЕСТНУЮ, глобальную не трогает
+    return limit
+
+def readsGlobal():
+    return limit
+
+def factorial(n):
+    if n < 2:
+        return 1
+    return n * factorial(n - 1)
+
+def sign(n):
+    branch = 0
+    if n < 0:
+        branch = 0 - 1
+    else:
+        if n > 0:
+            branch = 1
+    return branch
+
+print("HITTIS: LANGUAGE CHECK")
+
+check(0, later(21), 42)
+check(0, color, 4283207167)          # 0xFF4C8DFF, старший бит — часть числа
+check(0, (65536 * 65536) / 65536, 65536)  # считаем шире, чем пишем
+check(0, globalStaysPut(), 7)
+check(0, limit, 100)               # глобальная не изменилась
+check(0, readsGlobal(), 100)
+check(0, factorial(6), 720)
+check(0, sign(0 - 5), 0 - 1)
+check(0, sign(0), 0)
+check(0, sign(9), 1)
+check(0, 7 / 2, 3)                  # целочисленное деление
+check(0, 0 - 7 / 2, 0 - 3)
+check(0, 7 % 3, 1)
+check(0, 2 + 3 * 4, 14)             # приоритет операций
+check(0, (2 + 3) * 4, 20)
+check(0, 1 < 2, 1)                  # сравнение даёт 1 или 0
+check(0, 2 < 1, 0)
+check(0, not 0, 1)
+check(0, not 5, 0)
+check(0, 1 and 0, 0)
+check(0, 0 or 3, 1)                 # or даёт 1, а не 3
+
+count = 0
+loop = 0
+while loop < 5:
+    count = count + loop
+    loop = loop + 1
+check(0, count, 10)
+
+print("HITTIS: CHECK FINISHED")

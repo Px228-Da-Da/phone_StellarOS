@@ -1,0 +1,241 @@
+app "CALCULATOR"
+
+background = 0xFF101218
+panel = 0xFF1B2029
+button = 0xFF252C38
+operator = 0xFF4C8DFF
+clearColor = 0xFFE05252
+white = 0xFFFFFFFF
+grey = 0xFFB8C0CC
+
+mln = 65536 * 65536
+
+first = 0
+second = 0
+input = 0
+operation = 0
+alive = 1
+
+
+def calculate(a, b, action):
+    if action == 1:
+        return a + b
+    else:
+        if action == 2:
+            return a - b
+        else:
+            if action == 3:
+                return a * b
+            else:
+                if action == 4:
+                    if b == 0:
+                        return 0
+                    else:
+                        return a / b
+    return a
+
+
+while alive:
+
+    width = width()
+    tall = height()
+
+    rect(0, 0, width, tall, background)
+
+    # Дисплей
+
+    rect(20, 20, width - 40, 140, panel)
+
+    text(45, 45, 2, grey, "CALCULATOR")
+    textn(45, 85, 5, white, input)
+
+
+    # Розміри кнопок
+
+    gap = 10
+    btnW = (width - 50) / 4
+    btnH = (tall - 230) / 4
+
+    x1 = 20
+    x2 = x1 + btnW + gap
+    x3 = x2 + btnW + gap
+    x4 = x3 + btnW + gap
+
+    y1 = 190
+    y2 = y1 + btnH + gap
+    y3 = y2 + btnH + gap
+    y4 = y3 + btnH + gap
+
+
+    # 7 8 9 /
+
+    rect(x1, y1, btnW, btnH, button)
+    textn(x1 + 60, y1 + 30, 4, white, 22)
+
+    rect(x2, y1, btnW, btnH, button)
+    textn(x2 + 60, y1 + 30, 4, white, 8)
+
+    rect(x3, y1, btnW, btnH, button)
+    textn(x3 + 60, y1 + 30, 4, white, 9)
+
+    rect(x4, y1, btnW, btnH, operator)
+    text(x4 + 60, y1 + 30, 4, white, "/")
+
+
+    # 4 5 6 *
+
+    rect(x1, y2, btnW, btnH, button)
+    textn(x1 + 60, y2 + 30, 4, white, 4)
+
+    rect(x2, y2, btnW, btnH, button)
+    textn(x2 + 60, y2 + 30, 4, white, 5)
+
+    rect(x3, y2, btnW, btnH, button)
+    textn(x3 + 60, y2 + 30, 4, white, 6)
+
+    rect(x4, y2, btnW, btnH, operator)
+    text(x4 + 60, y2 + 30, 4, white, "*")
+
+
+    # 1 2 3 -
+
+    rect(x1, y3, btnW, btnH, button)
+    textn(x1 + 60, y3 + 30, 4, white, 1)
+
+    rect(x2, y3, btnW, btnH, button)
+    textn(x2 + 60, y3 + 30, 4, white, 2)
+
+    rect(x3, y3, btnW, btnH, button)
+    textn(x3 + 60, y3 + 30, 4, white, 3)
+
+    rect(x4, y3, btnW, btnH, operator)
+    text(x4 + 60, y3 + 30, 4, white, "-")
+
+
+    # 0 C = +
+
+    rect(x1, y4, btnW, btnH, button)
+    textn(x1 + 60, y4 + 30, 4, white, 0)
+
+    rect(x2, y4, btnW, btnH, clearColor)
+    text(x2 + 60, y4 + 30, 4, white, "C")
+
+    rect(x3, y4, btnW, btnH, operator)
+    text(x3 + 60, y4 + 30, 4, white, "=")
+
+    rect(x4, y4, btnW, btnH, operator)
+    text(x4 + 60, y4 + 30, 4, white, "+")
+
+
+    show()
+
+
+    touchValue = touch()
+
+    if touchValue < 0:
+        alive = 0
+    else:
+        touchAction = touchValue / (mln * 65536)
+        x = (touchValue / mln) % 65536
+        y = touchValue % mln
+
+        if touchAction == 2:
+
+            # Ряд 1
+
+            if y >= y1:
+                if y < y2:
+
+                    if x >= x1:
+                        if x < x2:
+                            input = input * 10 + 7
+
+                    if x >= x2:
+                        if x < x3:
+                            input = input * 10 + 8
+
+                    if x >= x3:
+                        if x < x4:
+                            input = input * 10 + 9
+
+                    if x >= x4:
+                        first = input
+                        input = 0
+                        operation = 4
+
+
+            # Ряд 2
+
+            if y >= y2:
+                if y < y3:
+
+                    if x >= x1:
+                        if x < x2:
+                            input = input * 10 + 4
+
+                    if x >= x2:
+                        if x < x3:
+                            input = input * 10 + 5
+
+                    if x >= x3:
+                        if x < x4:
+                            input = input * 10 + 6
+
+                    if x >= x4:
+                        first = input
+                        input = 0
+                        operation = 3
+
+
+            # Ряд 3
+
+            if y >= y3:
+                if y < y4:
+
+                    if x >= x1:
+                        if x < x2:
+                            input = input * 10 + 1
+
+                    if x >= x2:
+                        if x < x3:
+                            input = input * 10 + 2
+
+                    if x >= x3:
+                        if x < x4:
+                            input = input * 10 + 3
+
+                    if x >= x4:
+                        first = input
+                        input = 0
+                        operation = 2
+
+
+            # Ряд 4
+
+            if y >= y4:
+
+                if x >= x1:
+                    if x < x2:
+                        input = input * 10
+
+
+                if x >= x2:
+                    if x < x3:
+                        first = 0
+                        second = 0
+                        input = 0
+                        operation = 0
+
+
+                if x >= x3:
+                    if x < x4:
+                        second = input
+                        input = calculate(first, second, operation)
+                        first = input
+                        operation = 0
+
+
+                if x >= x4:
+                    first = input
+                    input = 0
+                    operation = 1

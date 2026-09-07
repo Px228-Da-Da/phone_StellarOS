@@ -1,9 +1,9 @@
 {
   "app": {
-    "id": "os.stellar.hello",
-    "name": "ПРИВЕТ",
+    "id": "os.stellar.счётчик",
+    "name": "COUNTER",
     "version": "1.0.0",
-    "description": "Первое приложение: печатает и считает",
+    "description": "Counts touches and draws a bar",
     "author": "StellarOS",
     "logo": "logo.png",
     "start_app_logo": "logo.png",
@@ -17,7 +17,7 @@
   },
   "permissions": [],
   "settings": {
-    "language": "ru",
+    "language": "en",
     "debug": false
   }
 }

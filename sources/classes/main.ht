@@ -1,0 +1,35 @@
+# Classes: fields, methods, constructor, two independent objects.
+
+app "CLASSES"
+
+class Counter:
+    def create(self, start):
+        self.value = start
+        self.steps = 0
+        return 0
+
+    def add(self, howMany):
+        self.value = self.value + howMany
+        self.steps = self.steps + 1
+        return self.value
+
+    def show(self):
+        print("VALUE:")
+        printn(self.value)
+        print("STEPS:")
+        printn(self.steps)
+        return 0
+
+
+a = Counter(10)
+b = Counter(100)
+
+a.add(5)
+a.add(7)
+b.add(1)
+
+a.show()
+b.show()
+
+print("FIELD READ FROM OUTSIDE:")
+printn(b.value)

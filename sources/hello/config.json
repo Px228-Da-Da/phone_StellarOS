@@ -1,9 +1,9 @@
 {
   "app": {
-    "id": "os.stellar.classes",
-    "name": "КЛАССЫ",
+    "id": "os.stellar.hello",
+    "name": "HELLO",
     "version": "1.0.0",
-    "description": "Проверка классов: поля, методы, конструктор",
+    "description": "First app: printing and counting",
     "author": "StellarOS",
     "logo": "logo.png",
     "start_app_logo": "logo.png",
@@ -17,7 +17,7 @@
   },
   "permissions": [],
   "settings": {
-    "language": "ru",
+    "language": "en",
     "debug": false
   }
 }

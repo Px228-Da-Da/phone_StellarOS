@@ -1,9 +1,9 @@
 {
   "app": {
-    "id": "os.stellar.счётчик",
-    "name": "СЧЁТЧИК",
+    "id": "os.stellar.проверка",
+    "name": "CHECK",
     "version": "1.0.0",
-    "description": "Считает касания и рисует полосу",
+    "description": "Language check: numbers, conditions, calls",
     "author": "StellarOS",
     "logo": "logo.png",
     "start_app_logo": "logo.png",
@@ -17,7 +17,7 @@
   },
   "permissions": [],
   "settings": {
-    "language": "ru",
+    "language": "en",
     "debug": false
   }
 }

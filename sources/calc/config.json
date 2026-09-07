@@ -1,10 +1,10 @@
 {
   "app": {
     "id": "com.example.myapp",
-    "name": "Название приложения",
+    "name": "CALC",
     "version": "1.0.0",
-    "description": "Краткое описание приложения",
-    "author": "Ваше имя или компания",
+    "description": "Calculator",
+    "author": "StellarOS",
     "logo": "logo.png",
     "start_app_logo": "logo.png",
     "entry": "main.ht"
@@ -21,7 +21,7 @@
     "internet"
   ],
   "settings": {
-    "language": "ru",
+    "language": "en",
     "debug": false
   }
 }

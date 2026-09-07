@@ -1,0 +1,29 @@
+# Первое приложение: считает касания и рисует полосу.
+
+app "COUNTER"
+
+background   = 0xFF0B1020
+white = 0xFFFFFFFF
+blue = 0xFF4C8DFF
+
+def bar(howMany):
+    width = howMany * 20
+    if width > 560:
+        width = 560
+    rect(20, 200, width, 40, blue)
+
+count = 0
+alive = 1
+
+while alive:
+    rect(0, 0, 600, 400, background)
+    text(20, 40, 4, white, "TOUCHES")
+    textn(400, 40, 4, blue, count)
+    bar(count)
+    show()
+
+    touchValue = touch()
+    if touchValue < 0:
+        alive = 0
+    else:
+        count = count + 1
