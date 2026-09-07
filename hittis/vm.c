@@ -341,11 +341,50 @@ static int member_of(struct vm *m, vm_u32 cls, vm_u32 name,
     return 0;
 }
 
+/*
+ * Отвести место в куче. Возвращает указатель или 0, если места нет.
+ *
+ * Ноль никому не выдаётся: он означает «ничего», и путать его с
+ * настоящим указателем нельзя.
+ */
+static vm_u32 heap_alloc(struct vm *m, vm_u32 cells)
+{
+    vm_u32 at;
+
+    if (m->hp == 0)
+        m->hp = 1;
+    if (m->hp + cells > VM_HEAP) {
+        fail(m, "кончилась память под объекты");
+        return 0;
+    }
+    at = m->hp;
+    m->hp += cells;
+    return at;
+}
+
+/* Список по указателю */
+static int list_at(struct vm *m, vm_i64 h)
+{
+    if (h <= 0 || (vm_u32)h >= m->hp) {
+        fail(m, "это не список");
+        return 0;
+    }
+    if (m->heap[h] != SLT_LIST_TAG) {
+        fail(m, "это объект, а не список");
+        return 0;
+    }
+    return 1;
+}
+
 /* Объект по указателю: проверяем, что он вообще наш */
 static int object_at(struct vm *m, vm_i64 h, vm_u32 *cls)
 {
     if (h <= 0 || (vm_u32)h >= m->hp) {
         fail(m, "это не объект");
+        return 0;
+    }
+    if (m->heap[h] == SLT_LIST_TAG) {
+        fail(m, "это список, а не объект");
         return 0;
     }
     *cls = (vm_u32)m->heap[h];
@@ -654,6 +693,122 @@ int vm_run(const void *image, vm_u32 len, const struct vm_host *host)
          * работы. Объект лежит под аргументами и становится первым из
          * них: внутри метода он и есть «сам».
          */
+        /*
+         * Собрать список из того, что лежит на стеке.
+         *
+         * Мест отводим не меньше четырёх: список почти всегда потом
+         * дополняют, а переносить его с первого же добавления — значит
+         * дважды пройти по памяти на пустом месте.
+         */
+        case OP_LIST: {
+            vm_u32 n = operand(&m);
+            vm_u32 cap = n < 4 ? 4 : n;
+            vm_u32 at, data, i;
+
+            if ((vm_u32)m.sp < n) {
+                fail(&m, "на стеке меньше значений, чем в списке");
+                break;
+            }
+            at = heap_alloc(&m, 4);
+            if (!at)
+                break;
+            data = heap_alloc(&m, cap);
+            if (!data)
+                break;
+
+            m.heap[at]     = SLT_LIST_TAG;
+            m.heap[at + 1] = n;
+            m.heap[at + 2] = cap;
+            m.heap[at + 3] = data;
+            for (i = 0; i < n; i++)
+                m.heap[data + (n - 1 - i)] = pop(&m);
+            push(&m, (vm_i64)at);
+            break;
+        }
+
+        case OP_GETI: {
+            vm_i64 i = pop(&m);
+            vm_i64 h = pop(&m);
+
+            if (!list_at(&m, h))
+                break;
+            if (i < 0 || i >= m.heap[h + 1]) {
+                fail(&m, "номер за пределами списка");
+                break;
+            }
+            push(&m, m.heap[m.heap[h + 3] + i]);
+            break;
+        }
+
+        case OP_SETI: {
+            vm_i64 v = pop(&m);
+            vm_i64 i = pop(&m);
+            vm_i64 h = pop(&m);
+
+            if (!list_at(&m, h))
+                break;
+            if (i < 0 || i >= m.heap[h + 1]) {
+                fail(&m, "номер за пределами списка");
+                break;
+            }
+            m.heap[m.heap[h + 3] + i] = v;
+            break;
+        }
+
+        case OP_LEN: {
+            vm_i64 h = pop(&m);
+
+            if (!list_at(&m, h))
+                break;
+            push(&m, m.heap[h + 1]);
+            break;
+        }
+
+        /*
+         * Добавить в конец.
+         *
+         * Места не хватило — отводим вдвое просторнее и переносим
+         * значения, а в заголовке меняем ссылку. Указатель, который
+         * держит программа, при этом остаётся верным: заголовок с места
+         * не двигается. Ради этого он и заведён.
+         */
+        case OP_APPEND: {
+            vm_i64 v = pop(&m);
+            vm_i64 h = pop(&m);
+            vm_i64 n, cap, data;
+
+            if (!list_at(&m, h))
+                break;
+            n    = m.heap[h + 1];
+            cap  = m.heap[h + 2];
+            data = m.heap[h + 3];
+
+            if (n >= cap) {
+                vm_u32 grown = (vm_u32)(cap * 2);
+                vm_u32 to = heap_alloc(&m, grown);
+                vm_i64 i;
+
+                if (!to)
+                    break;
+                for (i = 0; i < n; i++)
+                    m.heap[to + i] = m.heap[data + i];
+                m.heap[h + 2] = grown;
+                m.heap[h + 3] = to;
+                data = to;
+            }
+
+            m.heap[data + n] = v;
+            m.heap[h + 1] = n + 1;
+            /*
+             * Возвращаем новую длину. В этом языке всякое выражение
+             * даёт значение — иначе «add(список, 1)» отдельной строкой
+             * оставляло бы стек пустым, а следующий за ним сброс
+             * значения снимал бы чужое.
+             */
+            push(&m, n + 1);
+            break;
+        }
+
         case OP_CALLM: {
             vm_u32 name = operand(&m);
             vm_u32 argc = operand(&m);

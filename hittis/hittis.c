@@ -280,7 +280,7 @@ static void lex(void)
                 }
             }
             /* Точка появилась вместе с классами: «объект.поле» */
-            if (strchr("+-*/%<>=(),:.", c)) {
+            if (strchr("+-*/%<>=(),:.[]", c)) {
                 char one[2] = { c, 0 };
 
                 push_tok(T_OP, one, 0, 0);
@@ -569,6 +569,28 @@ static void primary(void)
         expect_op(")");
         return;
     }
+
+    /* Список прямо в тексте: [1, 2, 3] или просто [] */
+    if (is_op("[")) {
+        int n = 0;
+
+        tpos++;
+        if (!is_op("]")) {
+            for (;;) {
+                expr();
+                n++;
+                if (is_op(",")) {
+                    tpos++;
+                    continue;
+                }
+                break;
+            }
+        }
+        expect_op("]");
+        emit(OP_LIST);
+        emit_i32(n);
+        return;
+    }
     if (t->kind == T_NAME) {
         char name[64];
         int i;
@@ -577,17 +599,47 @@ static void primary(void)
         name[sizeof(name) - 1] = 0;
         tpos++;
 
+        /*
+         * len и add — команды самой машины, а не обращения к системе.
+         *
+         * Обращение наружу нужно там, где без мира не обойтись:
+         * нарисовать, напечатать, спросить палец. Длина списка миру не
+         * интересна, и гонять её через ту же дверь значило бы делать
+         * вид, что список живёт где-то снаружи. Он живёт в машине.
+         */
+        if (is_op("(") && (!strcmp(name, "len") || !strcmp(name, "add"))) {
+            int want = !strcmp(name, "len") ? 1 : 2;
+            int argc = 0;
+
+            tpos++;
+            if (!is_op(")")) {
+                for (;;) {
+                    expr();
+                    argc++;
+                    if (is_op(",")) {
+                        tpos++;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect_op(")");
+            if (argc != want)
+                die(t->line, "не столько аргументов");
+            emit(want == 1 ? OP_LEN : OP_APPEND);
+            return;
+        }
+
         if (is_op("(") && find_class(name) >= 0) {
             /*
              * Создание объекта.
              *
-             * Заводим его, удваиваем указатель и зовём «создать» — тот
-             * самый метод, который в других языках называют
-             * конструктором. Удвоение нужно потому, что метод указатель
+             * Заводим его, удваиваем указатель и зовём create — тот самый
+             * метод, который в других языках называют конструктором. Удвоение нужно потому, что метод указатель
              * съест, а вернуть нам надо именно его: значение метода
              * выбрасываем, объект остаётся.
              *
-             * Нет метода «создать» — значит объект просто заводится с
+             * Нет метода create — значит объект просто заводится с
              * нулевыми полями, и это законно.
              */
             int cls = find_class(name);
@@ -597,7 +649,7 @@ static void primary(void)
             for (j = 0; j < classes[cls].nmethods; j++) {
                 int at = classes[cls].members + classes[cls].nfields + j;
 
-                if (!strcmp(member_name[at], "создать"))
+                if (!strcmp(member_name[at], "create"))
                     has_new = 1;
             }
 
@@ -622,9 +674,9 @@ static void primary(void)
                 }
                 expect_op(")");
                 emit(OP_CALLM);
-                emit_i32(intern("создать", 14));
+                emit_i32(intern("create", 6));
                 emit_i32(argc);
-                emit(OP_POP);           /* что вернул «создать», не нужно */
+                emit(OP_POP);           /* что вернул create, не нужно */
             } else {
                 expect_op("(");
                 expect_op(")");
@@ -686,13 +738,40 @@ static void primary(void)
  * дешевле, чем строки, а совпадают они ровно тогда, когда совпадают
  * имена: одинаковый текст компилятор интернирует один раз.
  */
+/*
+ * Чем кончилась последняя цепочка.
+ *
+ * Нужно для присваивания: «а.б = 1» и «а[и] = 1» разбираются так же,
+ * как чтение, а потом последнее взятие превращается в запись. Так
+ * работает любая цепочка любой длины, и не приходится заранее угадывать
+ * её вид по двум-трём токенам вперёд.
+ */
+static int last_get_op;         /* OP_GETF или OP_GETI, 0 — не было   */
+static int last_get_at;         /* где эта команда началась в коде    */
+static int last_get_name;       /* имя поля, если это было поле       */
+
 static void postfix(void)
 {
     primary();
+    last_get_op = 0;
 
-    while (is_op(".")) {
+    for (;;) {
         struct token *t;
         char name[64];
+
+        /* Номер в списке: значение[номер] */
+        if (is_op("[")) {
+            tpos++;
+            expr();
+            expect_op("]");
+            last_get_op = OP_GETI;
+            last_get_at = code_len;
+            emit(OP_GETI);
+            continue;
+        }
+
+        if (!is_op("."))
+            break;
 
         tpos++;
         if (cur()->kind != T_NAME)
@@ -722,8 +801,11 @@ static void postfix(void)
             emit_i32(intern(name, (int)strlen(name)));
             emit_i32(argc);
         } else {
+            last_get_op = OP_GETF;
+            last_get_at = code_len;
+            last_get_name = intern(name, (int)strlen(name));
             emit(OP_GETF);
-            emit_i32(intern(name, (int)strlen(name)));
+            emit_i32(last_get_name);
         }
     }
 }
@@ -859,49 +941,45 @@ static void statement(void)
     }
 
     /*
-     * Присваивание в поле: «что-то.поле = значение».
+     * Присваивание в поле или в элемент списка.
      *
-     * Узнаём это заглядыванием вперёд: имя, затем цепочка точек, затем
-     * знак равенства. Иначе пришлось бы разбирать левую часть как
-     * выражение и потом переигрывать уже выданные команды — а
-     * переигрывать выданное всегда дороже, чем посмотреть на два токена
-     * заранее.
+     * Левую часть разбираем как обычное чтение, а потом, если следом
+     * стоит знак равенства, отматываем последнее взятие и ставим на его
+     * место запись. Стек при этом уже подготовлен правильно: под запись
+     * поля лежит объект, под запись элемента — список и номер.
+     *
+     * Так работает цепочка любой длины и любого вида. Заглядывание
+     * вперёд на два-три токена, с которого я начал, разбирало только
+     * заранее придуманные случаи и молча пропускало остальные.
      */
     if (t->kind == T_NAME && toks[tpos + 1].kind == T_OP &&
-        !strcmp(toks[tpos + 1].text, ".")) {
-        int j = tpos + 1;
-        int dots = 0;
+        (!strcmp(toks[tpos + 1].text, ".") ||
+         !strcmp(toks[tpos + 1].text, "["))) {
+        int save_code = code_len;
+        int save_tok = tpos;
 
-        while (toks[j].kind == T_OP && !strcmp(toks[j].text, ".") &&
-               toks[j + 1].kind == T_NAME) {
-            dots++;
-            j += 2;
-        }
+        postfix();
 
-        if (dots > 0 && toks[j].kind == T_OP && !strcmp(toks[j].text, "=")) {
-            char field[64];
-            int k;
+        if (last_get_op && is_op("=")) {
+            int op = last_get_op;
+            int name = last_get_name;
 
-            /* Всё до последней точки — обычное выражение: объект */
-            primary();
-            for (k = 0; k < dots - 1; k++) {
-                tpos++;                     /* точка */
-                emit(OP_GETF);
-                emit_i32(intern(cur()->text, (int)strlen(cur()->text)));
-                tpos++;                     /* имя   */
-            }
-            tpos++;                         /* последняя точка */
-            strncpy(field, cur()->text, sizeof(field) - 1);
-            field[sizeof(field) - 1] = 0;
-            tpos++;                         /* имя поля */
-
-            expect_op("=");
+            code_len = last_get_at;     /* отматываем взятие */
+            tpos++;                     /* съели «=»         */
             expr();
-            emit(OP_SETF);
-            emit_i32(intern(field, (int)strlen(field)));
+            if (op == OP_GETF) {
+                emit(OP_SETF);
+                emit_i32(name);
+            } else {
+                emit(OP_SETI);
+            }
             expect_newline();
             return;
         }
+
+        /* Не присваивание — начинаем заново и идём общим путём */
+        code_len = save_code;
+        tpos = save_tok;
     }
 
     /* Присваивание или просто выражение */

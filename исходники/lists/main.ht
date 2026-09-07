@@ -1,0 +1,53 @@
+# Lists: literals, indexing, growth, lists inside objects.
+
+app "LISTS"
+
+class Bag:
+    def create(self, name):
+        self.name = name
+        self.items = []
+        return 0
+
+    def put(self, value):
+        add(self.items, value)
+        return len(self.items)
+
+    def total(self):
+        i = 0
+        sum = 0
+        while i < len(self.items):
+            sum = sum + self.items[i]
+            i = i + 1
+        return sum
+
+
+numbers = [10, 20, 30]
+print("LENGTH:")
+printn(len(numbers))
+
+print("SECOND:")
+printn(numbers[1])
+
+numbers[1] = 99
+print("SECOND AFTER WRITE:")
+printn(numbers[1])
+
+# Growth: four places were reserved, we put in ten.
+i = 0
+while i < 10:
+    add(numbers, i * i)
+    i = i + 1
+
+print("LENGTH AFTER GROWTH:")
+printn(len(numbers))
+print("LAST:")
+printn(numbers[len(numbers) - 1])
+
+bag = Bag("coins")
+bag.put(5)
+bag.put(7)
+bag.put(9)
+print("BAG COUNT:")
+printn(len(bag.items))
+print("BAG TOTAL:")
+printn(bag.total())
