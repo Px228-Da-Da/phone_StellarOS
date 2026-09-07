@@ -15,6 +15,8 @@
 #include "syscall.h"
 #include "psci.h"
 #include "rtc.h"
+#include "pmic.h"
+#include "ovl.h"
 #include "appload.h"
 #include "sched.h"
 #include "timer.h"
@@ -360,6 +362,41 @@ static void syscall(struct trapframe *f)
                   ((u64)t.month << 8) | (u64)t.year;
         return;
     }
+
+    /*
+     * Кнопка питания: было ли нажатие с прошлого раза.
+     *
+     * Отдаём СОБЫТИЕ, а не текущее состояние. Спрашивающему нужно
+     * «нажали», а не «держат»: по состоянию он поймал бы одно нажатие
+     * десятки раз подряд, пока палец на кнопке, и экран замигал бы.
+     *
+     * Фронт ловим здесь же: помним, была ли кнопка нажата в прошлый
+     * раз, и о событии сообщаем только на переходе.
+     */
+    case SYS_PWRKEY: {
+        static int was, pending;
+        int now = pmic_powerkey();
+
+        if (now && !was)
+            pending = 1;
+        was = now;
+
+        f->x[0] = (u64)pending;
+        pending = 0;
+        return;
+    }
+
+    /*
+     * Погасить или вернуть экран.
+     *
+     * Решает не ядро, а оболочка: что считать бездействием и когда
+     * запирать — это её дело, и держать эту политику в ядре значило бы
+     * запретить её менять из программы.
+     */
+    case SYS_BLANK:
+        ovl_blank(f->x[0] ? 1 : 0);
+        f->x[0] = 0;
+        return;
 
     case SYS_TEXTW:
         f->x[0] = (u64)(s64)sys_textw(f->x[0], f->x[1], f->x[2]);

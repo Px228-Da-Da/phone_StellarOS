@@ -190,6 +190,23 @@ static inline s64 clock_now(void)
 #define CLOCK_DAY(v)    ((u32)(((u64)(v) >> 16) & 0xFF))
 #define CLOCK_MONTH(v)  ((u32)(((u64)(v) >> 8) & 0xFF))
 
+/*
+ * Кнопка питания: 1, если её нажимали с прошлого спроса.
+ *
+ * Именно событие, а не состояние: пока палец на кнопке, состояние
+ * держится, и по нему одно нажатие сработало бы десятки раз.
+ */
+static inline s64 power_key(void)
+{
+    return sys(SYS_PWRKEY, 0, 0, 0, 0, 0, 0);
+}
+
+/* Погасить экран (1) или вернуть (0). Телефон при этом работает. */
+static inline s64 screen_blank(u32 on)
+{
+    return sys(SYS_BLANK, on, 0, 0, 0, 0, 0);
+}
+
 static inline s64 textw(u32 scale, const char *s)
 {
     return sys(SYS_TEXTW, scale, (u64)s, ustrlen(s), 0, 0, 0);

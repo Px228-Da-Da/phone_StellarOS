@@ -49,7 +49,10 @@
 #define SYS_CLOCK       20      /* vremya sutok iz RTC kontrollera pitaniya */
                                 /* upakovano: chas<<40|min<<32|sek<<24|     */
                                 /* den<<16|mesyats<<8|god; -1 esli net chasov */
-#define SYS_COUNT       21
+#define SYS_PWRKEY      21      /* bylo li nazhatie knopki pitaniya:      */
+                                /* 1 - da, i priznak snimaetsya           */
+#define SYS_BLANK       22      /* x0: 1 pogasit ekran, 0 vernut          */
+#define SYS_COUNT       23
 
 /*
  * Событие касания в том виде, в каком его получает EL0.

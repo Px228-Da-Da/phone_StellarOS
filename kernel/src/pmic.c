@@ -184,10 +184,34 @@ int pmic_write(u32 reg, u16 val)
     return rc;
 }
 
+/*
+ * Кнопка питания.
+ *
+ * Живёт в том же регистре состояния, что и признак зарядки, но в другом
+ * бите. Раскладка из драйвера вендора drivers/input/keyboard/mtk-pmic-keys.c:
+ * для MT6358 кнопка питания это маска 0x2 в MT6358_TOPSTATUS.
+ *
+ * Внимание к знаку: там же видно, что нажатие это НОЛЬ, а не единица —
+ * «pressed = !key_deb». Регистр показывает не «нажата», а «отпущена»,
+ * и перепутать здесь означало бы получить кнопку, нажатую всегда.
+ */
+#define MT6358_TOPSTATUS_REG    0x0028
+#define PWRKEY_MASK             0x0002
+
+int pmic_powerkey(void)
+{
+    u16 v;
+
+    if (pmic_read(MT6358_TOPSTATUS_REG, &v) != 0)
+        return 0;
+    return (v & PWRKEY_MASK) ? 0 : 1;
+}
+
 #else   /* в эмуляторе PMIC нет */
 
 void pmic_use_regs(u32 c, u32 r, u32 v) { (void)c; (void)r; (void)v; }
 int  pmic_read(u32 reg, u16 *out) { (void)reg; (void)out; return -1; }
 int  pmic_write(u32 reg, u16 val)  { (void)reg; (void)val; return -1; }
+int  pmic_powerkey(void) { return 0; }
 
 #endif

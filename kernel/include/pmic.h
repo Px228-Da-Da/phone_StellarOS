@@ -34,6 +34,9 @@ int pmic_read(u32 reg, u16 *out);
 /* Записать регистр PMIC. 0 — успех. */
 int pmic_write(u32 reg, u16 val);
 
+/* Нажата ли кнопка питания прямо сейчас: 1 — да */
+int pmic_powerkey(void);
+
 /* Идентификатор микросхемы: первое, чем стоит проверять канал */
 #define MT6358_SWCID        0x000A
 
