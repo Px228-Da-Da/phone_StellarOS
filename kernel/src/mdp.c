@@ -319,7 +319,13 @@ static void mutex_dump(void)
 #define WDMA_SRC_SIZE       0x018
 #define WDMA_CLIP_SIZE      0x01C
 #define WDMA_CLIP_COORD     0x020
+#define WDMA_SMI_CON        0x010
 #define WDMA_DST_W_IN_BYTE  0x028
+#define WDMA_BUF_CON1       0x038
+#define WDMA_BUF_CON3       0x104
+#define WDMA_BUF_CON4       0x108
+#define WDMA_BUF_CON5       0x200
+#define WDMA_BUF_CON6       0x204
 #define WDMA_ALPHA          0x02C
 #define WDMA_FLOW_CTRL_DBG  0x0A0
 #define WDMA_DST_ADDR0      0xF00
@@ -419,6 +425,43 @@ static void snapshot(void)
     mmio_write32(WDMA0_BASE + WDMA_DST_ADDR0,  (u32)(u64)snap_buf);
     mmio_write32(WDMA0_BASE + WDMA_DST_W_IN_BYTE, SNAP_W * 4);
     mmio_write32(WDMA0_BASE + WDMA_ALPHA,      (1U << 31) | 0xFF);
+
+    /*
+     * Пороги очереди. Их-то мы и не выставляли — и в этом всё дело.
+     *
+     * Построчный счёт показал, что дыра не сверху и не снизу: данные
+     * есть в строках с 3 по 255, но каждая заполнена примерно на семь
+     * десятых. Это не «поздно начали» и не «рано оборвали», это пропуски
+     * внутри строк — ровно то, что и означает бит недобора.
+     *
+     * А в регистрах, которые мы не трогали, стояло: BUF_CON1 18000074 —
+     * ULTRA_ENABLE и PRE_ULTRA_ENABLE в нуле, — и BUF_CON2 00000000.
+     * То есть блок никогда не просил у памяти приоритетную полосу и
+     * захлёбывался, когда обычной не хватало.
+     *
+     * Значения считает wdma_golden_setting() вендора; здесь тот же
+     * расчёт, выполненный для нашего экрана 1080x2340 при 60 Гц:
+     *
+     *   consume_rate = 1080*2340*60/1000*1250/16000       = 11846
+     *   preultra_low  = ceil(7*consume_rate*3/100 / 10)   = 249
+     *   preultra_high = ceil(6*consume_rate*3/100 / 10)   = 214
+     *   ultra_high    = ceil(4*consume_rate*3/100 / 10)   = 143
+     *   ultra_low     = preultra_high                     = 214
+     *
+     * В регистры кладётся не сам порог, а остаток очереди: размер
+     * очереди 288 минус порог.
+     *
+     * Что расчёт понят правильно, видно по SMI_CON: по формуле вендора
+     * выходит 02240007, а в железе лежит 12240007 — совпало всё, кроме
+     * одного бита, которого в описании полей нет вовсе.
+     */
+    mmio_write32(WDMA0_BASE + WDMA_SMI_CON,  0x02240007);
+    mmio_write32(WDMA0_BASE + WDMA_BUF_CON1, 0xD0000120);
+    mmio_write32(WDMA0_BASE + WDMA_BUF_CON3, 0x00100010);
+    mmio_write32(WDMA0_BASE + WDMA_BUF_CON4, 0x00000010);
+    mmio_write32(WDMA0_BASE + WDMA_BUF_CON5, 0x004A0027);
+    mmio_write32(WDMA0_BASE + WDMA_BUF_CON6, 0x0091004A);
+
     mmio_write32(WDMA0_BASE + WDMA_INTSTA,     0);   /* сбросить признаки */
 
     /* 4. Включаем приёмник ДО того, как ему что-то пошлют */
@@ -565,9 +608,9 @@ static void snapshot(void)
                 first, last, SNAP_H);
     }
 
-    kprintf("MDP      : НЕ ТРОГАЛИ: SMI_CON %08x BUF_CON1 %08x BUF_CON2 %08x\n",
-            mmio_read32(WDMA0_BASE + 0x010),
-            mmio_read32(WDMA0_BASE + 0x038),
+    kprintf("MDP      : ПОРОГИ: SMI_CON %08x BUF_CON1 %08x BUF_CON2 %08x\n",
+            mmio_read32(WDMA0_BASE + WDMA_SMI_CON),
+            mmio_read32(WDMA0_BASE + WDMA_BUF_CON1),
             mmio_read32(WDMA0_BASE + 0x03C));
     kprintf("MDP      :            СМЕЩЕНИЕ НАЗНАЧЕНИЯ %08x\n",
             mmio_read32(WDMA0_BASE + 0x080));
