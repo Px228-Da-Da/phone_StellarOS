@@ -1,0 +1,23 @@
+{
+  "app": {
+    "id": "os.stellar.classes",
+    "name": "КЛАССЫ",
+    "version": "1.0.0",
+    "description": "Проверка классов: поля, методы, конструктор",
+    "author": "StellarOS",
+    "logo": "logo.png",
+    "start_app_logo": "logo.png",
+    "entry": "main.ht"
+  },
+  "display": {
+    "orientation": "portrait",
+    "theme_color": "#0B1020",
+    "background_color": "#0B1020",
+    "fullscreen": true
+  },
+  "permissions": [],
+  "settings": {
+    "language": "ru",
+    "debug": false
+  }
+}

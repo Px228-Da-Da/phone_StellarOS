@@ -48,9 +48,12 @@ static vm_u32 vm_checksum(const vm_u8 *p, vm_u32 n)
  */
 struct vm_image {
     const vm_u8 *funcs;     /* таблица функций          */
+    const vm_u8 *classes;   /* таблица классов          */
+    const vm_u8 *members;   /* поля и методы классов    */
     const vm_u8 *strs;      /* область строк            */
     const vm_u8 *code;      /* байткод                  */
     vm_u32 nfuncs, nglobals, str_bytes, code_bytes;
+    vm_u32 nclasses, nmembers;
     vm_u16 win_w, win_h;
     const char *name;
 };
@@ -65,13 +68,17 @@ struct vm_image {
 #define HDR_GLOBALS     (HDR_FUNCS + 4)
 #define HDR_STRB        (HDR_GLOBALS + 4)
 #define HDR_CODEB       (HDR_STRB + 4)
-#define HDR_SUM         (HDR_CODEB + 4)
+#define HDR_CLASSES     (HDR_CODEB + 4)
+#define HDR_MEMBERS     (HDR_CLASSES + 4)
+#define HDR_SUM         (HDR_MEMBERS + 4)
 #define HDR_SIZE        (HDR_SUM + 4)
 
 #define FUNC_ENTRY      0
 #define FUNC_NARGS      4
 #define FUNC_NLOCALS    6
 #define FUNC_SIZE       8
+#define CLASS_SIZE      12
+#define MEMBER_SIZE     8
 
 static int parse_image(const void *raw, vm_u32 len, struct vm_image *img,
                        const struct vm_host *host)
@@ -100,17 +107,22 @@ static int parse_image(const void *raw, vm_u32 len, struct vm_image *img,
     img->nglobals  = rd32(p + HDR_GLOBALS);
     img->str_bytes = rd32(p + HDR_STRB);
     img->code_bytes = rd32(p + HDR_CODEB);
+    img->nclasses  = rd32(p + HDR_CLASSES);
+    img->nmembers  = rd32(p + HDR_MEMBERS);
 
-    need = HDR_SIZE + img->nfuncs * FUNC_SIZE + img->str_bytes +
-           img->code_bytes;
+    need = HDR_SIZE + img->nfuncs * FUNC_SIZE +
+           img->nclasses * CLASS_SIZE + img->nmembers * MEMBER_SIZE +
+           img->str_bytes + img->code_bytes;
     if (need > len || img->nfuncs == 0 || img->nglobals > VM_GLOBALS) {
         host->print("HITTIS: заголовок не сходится с размером файла\n");
         return -1;
     }
 
-    img->funcs = p + HDR_SIZE;
-    img->strs  = img->funcs + img->nfuncs * FUNC_SIZE;
-    img->code  = img->strs + img->str_bytes;
+    img->funcs   = p + HDR_SIZE;
+    img->classes = img->funcs + img->nfuncs * FUNC_SIZE;
+    img->members = img->classes + img->nclasses * CLASS_SIZE;
+    img->strs    = img->members + img->nmembers * MEMBER_SIZE;
+    img->code    = img->strs + img->str_bytes;
 
     sum = vm_checksum(img->funcs, need - HDR_SIZE);
     if (sum != rd32(p + HDR_SUM)) {
@@ -155,6 +167,15 @@ struct vm {
     int    fp;
 
     vm_i64 globals[VM_GLOBALS];
+
+    /*
+     * Куча объектов. Занимаем подряд и никогда не отпускаем — почему
+     * именно так, сказано у VM_HEAP в vm.h. Нулевая ячейка не выдаётся
+     * никому: ноль означает «ничего», и путать его с настоящим объектом
+     * нельзя.
+     */
+    vm_i64 heap[VM_HEAP];
+    vm_u32 hp;
 
     vm_u32 pc;
     int    stopped;
@@ -280,6 +301,59 @@ static vm_u32 operand(struct vm *m)
     v = rd32(m->img->code + m->pc);
     m->pc += 4;
     return v;
+}
+
+/* --- Объекты -------------------------------------------------------- */
+
+/*
+ * Найти член класса по имени.
+ *
+ * Имя приходит смещением в области строк, и сравниваем мы именно
+ * смещения, а не сами строки: одинаковые имена компилятор кладёт в
+ * область строк один раз, поэтому равенство смещений и есть равенство
+ * имён. Сравнение вышло в одно действие вместо посимвольного обхода.
+ */
+static int member_of(struct vm *m, vm_u32 cls, vm_u32 name,
+                     int want_method, vm_u32 *value)
+{
+    const vm_u8 *c;
+    vm_u32 first, nf, nm, i, from, to;
+
+    if (cls >= m->img->nclasses)
+        return 0;
+
+    c = m->img->classes + cls * CLASS_SIZE;
+    nf    = rd16(c + 4);
+    nm    = rd16(c + 6);
+    first = rd32(c + 8);
+
+    from = want_method ? first + nf : first;
+    to   = want_method ? first + nf + nm : first + nf;
+
+    for (i = from; i < to && i < m->img->nmembers; i++) {
+        const vm_u8 *e = m->img->members + i * MEMBER_SIZE;
+
+        if (rd32(e) == name) {
+            *value = rd32(e + 4);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Объект по указателю: проверяем, что он вообще наш */
+static int object_at(struct vm *m, vm_i64 h, vm_u32 *cls)
+{
+    if (h <= 0 || (vm_u32)h >= m->hp) {
+        fail(m, "это не объект");
+        return 0;
+    }
+    *cls = (vm_u32)m->heap[h];
+    if (*cls >= m->img->nclasses) {
+        fail(m, "объект испорчен");
+        return 0;
+    }
+    return 1;
 }
 
 static void call_func(struct vm *m, vm_u32 idx)
@@ -499,6 +573,107 @@ int vm_run(const void *image, vm_u32 len, const struct vm_host *host)
         case OP_POP:
             pop(&m);
             break;
+
+        /*
+         * Завести объект.
+         *
+         * Отводим ячейку под номер класса и по одной на каждое поле,
+         * поля обнуляем. Указателем служит индекс первой ячейки — он же
+         * то самое число, которым объект и является для языка.
+         */
+        case OP_NEW: {
+            vm_u32 cls = operand(&m);
+            const vm_u8 *c;
+            vm_u32 nf, i;
+
+            if (cls >= img.nclasses) {
+                fail(&m, "нет такого класса");
+                break;
+            }
+            c = img.classes + cls * CLASS_SIZE;
+            nf = rd16(c + 4);
+
+            if (m.hp == 0)
+                m.hp = 1;               /* ноль не выдаём: это «ничего» */
+            if (m.hp + nf + 1 > VM_HEAP) {
+                fail(&m, "кончилась память под объекты");
+                break;
+            }
+            m.heap[m.hp] = cls;
+            for (i = 0; i < nf; i++)
+                m.heap[m.hp + 1 + i] = 0;
+            push(&m, (vm_i64)m.hp);
+            m.hp += nf + 1;
+            break;
+        }
+
+        case OP_DUP: {
+            vm_i64 v = pop(&m);
+
+            push(&m, v);
+            push(&m, v);
+            break;
+        }
+
+        case OP_GETF: {
+            vm_u32 name = operand(&m);
+            vm_i64 h = pop(&m);
+            vm_u32 cls, slot;
+
+            if (!object_at(&m, h, &cls))
+                break;
+            if (!member_of(&m, cls, name, 0, &slot)) {
+                fail(&m, "у объекта нет такого поля");
+                break;
+            }
+            push(&m, m.heap[h + 1 + slot]);
+            break;
+        }
+
+        case OP_SETF: {
+            vm_u32 name = operand(&m);
+            vm_i64 v = pop(&m);
+            vm_i64 h = pop(&m);
+            vm_u32 cls, slot;
+
+            if (!object_at(&m, h, &cls))
+                break;
+            if (!member_of(&m, cls, name, 0, &slot)) {
+                fail(&m, "у объекта нет такого поля");
+                break;
+            }
+            m.heap[h + 1 + slot] = v;
+            break;
+        }
+
+        /*
+         * Вызов метода.
+         *
+         * Какого класса окажется объект, компилятор знать не может —
+         * типов в языке нет, — поэтому метод ищется по имени во время
+         * работы. Объект лежит под аргументами и становится первым из
+         * них: внутри метода он и есть «сам».
+         */
+        case OP_CALLM: {
+            vm_u32 name = operand(&m);
+            vm_u32 argc = operand(&m);
+            vm_i64 h;
+            vm_u32 cls, fn;
+
+            if ((vm_u32)m.sp < argc + 1) {
+                fail(&m, "стек пуст, а метод ждёт объект");
+                break;
+            }
+            h = m.stack[m.sp - argc - 1];
+            if (!object_at(&m, h, &cls))
+                break;
+            if (!member_of(&m, cls, name, 1, &fn)) {
+                fail(&m, "у объекта нет такого метода");
+                break;
+            }
+            call_func(&m, fn);
+            break;
+        }
 
         default:
             fail(&m, "HITTIS: неизвестная команда\n");

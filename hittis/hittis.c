@@ -82,10 +82,28 @@ static void die(int line, const char *what)
 }
 
 /* Положить строку в общую область, вернуть её смещение */
+/*
+ * Положить строку в общую область и вернуть её смещение.
+ *
+ * Одинаковые строки кладём один раз, и это не экономия, а свойство, на
+ * которое опирается работа с объектами: имя поля машина сравнивает по
+ * смещению, а не посимвольно. Пока одинаковый текст давал разные
+ * смещения, ни одно поле не находилось — объект был, метод был, а
+ * встретиться они не могли.
+ */
 static int intern(const char *s, int len)
 {
-    int at = strlen_used;
+    int at = 0;
 
+    while (at < strlen_used) {
+        int have = (int)strlen(strbuf + at);
+
+        if (have == len && !memcmp(strbuf + at, s, (size_t)len))
+            return at;
+        at += have + 1;
+    }
+
+    at = strlen_used;
     if (strlen_used + len + 1 > MAX_STR)
         die(sline, "слишком много текста в программе");
     memcpy(strbuf + at, s, len);
@@ -261,7 +279,8 @@ static void lex(void)
                     }
                 }
             }
-            if (strchr("+-*/%<>=(),:", c)) {
+            /* Точка появилась вместе с классами: «объект.поле» */
+            if (strchr("+-*/%<>=(),:.", c)) {
                 char one[2] = { c, 0 };
 
                 push_tok(T_OP, one, 0, 0);
@@ -302,6 +321,62 @@ static int nglobals;
 static char local_name[MAX_NAMES][64];
 static int nlocals;
 static int in_func;             /* 0 — верхний уровень */
+
+/*
+ * Классы.
+ *
+ * Объект здесь — число, указатель на область в куче машины: значений,
+ * кроме целых, в языке нет. Поэтому какого класса окажется выражение,
+ * компилятор знать не может, и обращение «что-то.поле» разбирается уже
+ * на ходу, по имени. Имя кладём в область строк и передаём машине его
+ * смещением — сравнение имён у неё выходит в одно действие.
+ *
+ * Метод — обычная функция, у которой первый аргумент «сам». Имя ей
+ * даётся составное, «Класс.метод»: иначе два класса с методом
+ * «нарисовать» столкнулись бы в общей таблице функций.
+ */
+#define MAX_CLASSES 32
+#define MAX_MEMBERS 256
+
+static struct slt_class classes[MAX_CLASSES];
+static char class_name[MAX_CLASSES][64];
+static int  nclasses;
+
+static struct slt_member members[MAX_MEMBERS];
+static char member_name[MAX_MEMBERS][64];
+static int  nmembers;
+
+static int cur_class = -1;      /* внутри какого класса компилируем */
+
+/* «Сам» можно писать и по-русски, и по-английски: слово служебное, а
+ * привычка у всех своя. Внутри всё равно один и тот же нулевой аргумент. */
+static int is_self_name(const char *n)
+{
+    return !strcmp(n, "self") || !strcmp(n, "сам");
+}
+
+static int find_class(const char *n)
+{
+    int i;
+
+    for (i = 0; i < nclasses; i++)
+        if (!strcmp(class_name[i], n))
+            return i;
+    return -1;
+}
+
+/* Номер поля в классе; -1 — нет такого */
+static int find_field(int cls, const char *n)
+{
+    int i;
+
+    if (cls < 0)
+        return -1;
+    for (i = 0; i < classes[cls].nfields; i++)
+        if (!strcmp(member_name[classes[cls].members + i], n))
+            return i;
+    return -1;
+}
 
 static void emit(unsigned char op)
 {
@@ -440,6 +515,7 @@ static void expect_newline(void)
 }
 
 static void expr(void);
+static void postfix(void);
 
 static void call_args(int expected, const char *what)
 {
@@ -501,6 +577,61 @@ static void primary(void)
         name[sizeof(name) - 1] = 0;
         tpos++;
 
+        if (is_op("(") && find_class(name) >= 0) {
+            /*
+             * Создание объекта.
+             *
+             * Заводим его, удваиваем указатель и зовём «создать» — тот
+             * самый метод, который в других языках называют
+             * конструктором. Удвоение нужно потому, что метод указатель
+             * съест, а вернуть нам надо именно его: значение метода
+             * выбрасываем, объект остаётся.
+             *
+             * Нет метода «создать» — значит объект просто заводится с
+             * нулевыми полями, и это законно.
+             */
+            int cls = find_class(name);
+            int has_new = 0;
+            int j;
+
+            for (j = 0; j < classes[cls].nmethods; j++) {
+                int at = classes[cls].members + classes[cls].nfields + j;
+
+                if (!strcmp(member_name[at], "создать"))
+                    has_new = 1;
+            }
+
+            emit(OP_NEW);
+            emit_i32(cls);
+
+            if (has_new) {
+                int argc = 0;
+
+                emit(OP_DUP);
+                tpos++;                 /* съели «(» */
+                if (!is_op(")")) {
+                    for (;;) {
+                        expr();
+                        argc++;
+                        if (is_op(",")) {
+                            tpos++;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                expect_op(")");
+                emit(OP_CALLM);
+                emit_i32(intern("создать", 14));
+                emit_i32(argc);
+                emit(OP_POP);           /* что вернул «создать», не нужно */
+            } else {
+                expect_op("(");
+                expect_op(")");
+            }
+            return;
+        }
+
         if (is_op("(")) {
             /* Вызов: сначала встроенные, потом свои */
             for (i = 0; natives[i].name; i++) {
@@ -547,6 +678,56 @@ static void primary(void)
     die(t->line, "ожидалось значение");
 }
 
+/*
+ * Точка после значения: поле или метод.
+ *
+ * Разбираем цепочкой, чтобы «а.б.в» работало само собой. Имя кладём в
+ * область строк и передаём машине смещением — сравнивать смещения ей
+ * дешевле, чем строки, а совпадают они ровно тогда, когда совпадают
+ * имена: одинаковый текст компилятор интернирует один раз.
+ */
+static void postfix(void)
+{
+    primary();
+
+    while (is_op(".")) {
+        struct token *t;
+        char name[64];
+
+        tpos++;
+        if (cur()->kind != T_NAME)
+            die(cur()->line, "после точки ожидалось имя");
+        t = cur();
+        strncpy(name, t->text, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        tpos++;
+
+        if (is_op("(")) {
+            int argc = 0;
+
+            tpos++;
+            if (!is_op(")")) {
+                for (;;) {
+                    expr();
+                    argc++;
+                    if (is_op(",")) {
+                        tpos++;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect_op(")");
+            emit(OP_CALLM);
+            emit_i32(intern(name, (int)strlen(name)));
+            emit_i32(argc);
+        } else {
+            emit(OP_GETF);
+            emit_i32(intern(name, (int)strlen(name)));
+        }
+    }
+}
+
 static void unary(void)
 {
     if (is_op("-")) {
@@ -561,7 +742,7 @@ static void unary(void)
         emit(OP_NOT);
         return;
     }
-    primary();
+    postfix();
 }
 
 static void mul_expr(void)
@@ -677,6 +858,52 @@ static void statement(void)
         return;
     }
 
+    /*
+     * Присваивание в поле: «что-то.поле = значение».
+     *
+     * Узнаём это заглядыванием вперёд: имя, затем цепочка точек, затем
+     * знак равенства. Иначе пришлось бы разбирать левую часть как
+     * выражение и потом переигрывать уже выданные команды — а
+     * переигрывать выданное всегда дороже, чем посмотреть на два токена
+     * заранее.
+     */
+    if (t->kind == T_NAME && toks[tpos + 1].kind == T_OP &&
+        !strcmp(toks[tpos + 1].text, ".")) {
+        int j = tpos + 1;
+        int dots = 0;
+
+        while (toks[j].kind == T_OP && !strcmp(toks[j].text, ".") &&
+               toks[j + 1].kind == T_NAME) {
+            dots++;
+            j += 2;
+        }
+
+        if (dots > 0 && toks[j].kind == T_OP && !strcmp(toks[j].text, "=")) {
+            char field[64];
+            int k;
+
+            /* Всё до последней точки — обычное выражение: объект */
+            primary();
+            for (k = 0; k < dots - 1; k++) {
+                tpos++;                     /* точка */
+                emit(OP_GETF);
+                emit_i32(intern(cur()->text, (int)strlen(cur()->text)));
+                tpos++;                     /* имя   */
+            }
+            tpos++;                         /* последняя точка */
+            strncpy(field, cur()->text, sizeof(field) - 1);
+            field[sizeof(field) - 1] = 0;
+            tpos++;                         /* имя поля */
+
+            expect_op("=");
+            expr();
+            emit(OP_SETF);
+            emit_i32(intern(field, (int)strlen(field)));
+            expect_newline();
+            return;
+        }
+    }
+
     /* Присваивание или просто выражение */
     if (t->kind == T_NAME && toks[tpos + 1].kind == T_OP &&
         !strcmp(toks[tpos + 1].text, "=")) {
@@ -769,15 +996,96 @@ static void parse_app(void)
  * это ровно то, чего никто не ожидает от языка: порядок объявлений не
  * должен решать, что можно вызвать.
  */
+/*
+ * Обойти классы заранее.
+ *
+ * Как и с функциями: тело метода может обращаться к другому классу,
+ * который в исходнике ниже. Разбираем сначала объявления, потом код —
+ * иначе порядок в файле начал бы решать, что можно назвать.
+ *
+ * Поля класса нигде не объявляются: ими становится всё, чему метод
+ * присваивает через «сам». Так меньше слов и не бывает расхождения
+ * между списком полей и тем, что на самом деле используется.
+ */
+static void prescan_classes(void)
+{
+    int i, cls = -1, depth = 0;
+
+    for (i = 0; i + 1 < ntok; i++) {
+        if (toks[i].kind == T_INDENT && cls >= 0) {
+            depth++;
+            continue;
+        }
+        if (toks[i].kind == T_DEDENT && cls >= 0) {
+            if (--depth <= 0)
+                cls = -1;               /* тело класса кончилось */
+            continue;
+        }
+
+        if (toks[i].kind == T_NAME && !strcmp(toks[i].text, "class") &&
+            toks[i + 1].kind == T_NAME) {
+            if (nclasses >= MAX_CLASSES)
+                die(toks[i].line, "слишком много классов");
+            strncpy(class_name[nclasses], toks[i + 1].text, 63);
+            class_name[nclasses][63] = 0;
+            classes[nclasses].members = (unsigned int)nmembers;
+            classes[nclasses].nfields = 0;
+            classes[nclasses].nmethods = 0;
+            cls = nclasses++;
+            depth = 0;
+            continue;
+        }
+
+        /* Поле: «сам.имя =» внутри класса */
+        if (cls >= 0 && toks[i].kind == T_NAME &&
+            is_self_name(toks[i].text) &&
+            i + 3 < ntok &&
+            toks[i + 1].kind == T_OP && !strcmp(toks[i + 1].text, ".") &&
+            toks[i + 2].kind == T_NAME &&
+            toks[i + 3].kind == T_OP && !strcmp(toks[i + 3].text, "=")) {
+            if (find_field(cls, toks[i + 2].text) < 0) {
+                if (nmembers >= MAX_MEMBERS)
+                    die(toks[i].line, "слишком много полей");
+                /* Поля идут подряд, поэтому новое можно добавлять только
+                 * пока у класса нет ни одного метода. */
+                if (classes[cls].nmethods)
+                    die(toks[i].line,
+                        "поле появилось после метода: заведи его раньше");
+                strncpy(member_name[nmembers], toks[i + 2].text, 63);
+                member_name[nmembers][63] = 0;
+                members[nmembers].value = classes[cls].nfields;
+                nmembers++;
+                classes[cls].nfields++;
+            }
+        }
+    }
+}
+
 static void prescan_funcs(void)
 {
-    int i;
+    int i, cls = -1, depth = 0;
 
     /* Нулевая функция — сама программа: тело верхнего уровня */
     strcpy(func_name[0], "");
     nfuncs = 1;
 
     for (i = 0; i + 1 < ntok; i++) {
+        if (toks[i].kind == T_INDENT && cls >= 0) {
+            depth++;
+            continue;
+        }
+        if (toks[i].kind == T_DEDENT && cls >= 0) {
+            if (--depth <= 0)
+                cls = -1;
+            continue;
+        }
+        if (toks[i].kind == T_NAME && !strcmp(toks[i].text, "class") &&
+            toks[i + 1].kind == T_NAME) {
+            cls = find_class(toks[i + 1].text);
+            depth = 0;
+            continue;
+        }
+
         if (toks[i].kind == T_NAME && !strcmp(toks[i].text, "def") &&
             toks[i + 1].kind == T_NAME) {
             int nargs = 0, j = i + 2;
@@ -793,18 +1101,95 @@ static void prescan_funcs(void)
                         j++;
                 }
             }
-            strncpy(func_name[nfuncs], toks[i + 1].text, 63);
-            func_name[nfuncs][63] = 0;
+            if (cls >= 0) {
+                /*
+                 * Метод. Имя составное — «Класс.метод», — иначе два
+                 * класса с методом «нарисовать» столкнулись бы в общей
+                 * таблице функций.
+                 */
+                if (nmembers >= MAX_MEMBERS)
+                    die(toks[i].line, "слишком много членов класса");
+                snprintf(func_name[nfuncs], 64, "%s.%s",
+                         class_name[cls], toks[i + 1].text);
+                strncpy(member_name[nmembers], toks[i + 1].text, 63);
+                member_name[nmembers][63] = 0;
+                members[nmembers].value = (unsigned int)nfuncs;
+                nmembers++;
+                classes[cls].nmethods++;
+            } else {
+                strncpy(func_name[nfuncs], toks[i + 1].text, 63);
+                func_name[nfuncs][63] = 0;
+            }
             funcs[nfuncs].nargs = (unsigned short)nargs;
             nfuncs++;
         }
     }
 }
 
+/*
+ * Тело функции или метода.
+ *
+ * Метод отличается от функции ровно одним: он числится за классом, и
+ * его первый аргумент — «сам». Отдельного кода для этого не нужно, имя
+ * ему уже дано составное при предпросмотре, а «сам» становится обычной
+ * нулевой ячейкой кадра, когда мы разбираем список аргументов.
+ */
+static void compile_def(int *func_idx, int cls)
+{
+    int skip;
+
+    tpos++;
+    if (cur()->kind != T_NAME)
+        die(cur()->line, "после def ожидалось имя");
+    {
+        int f;
+
+        if (cls >= 0) {
+            char full[64];
+
+            snprintf(full, sizeof(full), "%s.%s", class_name[cls],
+                     cur()->text);
+            f = find_func(full);
+        } else {
+            f = find_func(cur()->text);
+        }
+        if (f < 0)
+            die(cur()->line, "функция не найдена (внутренняя ошибка)");
+        *func_idx = f;
+    }
+    tpos++;
+
+    skip = emit_jump(OP_JMP);   /* верхний уровень перепрыгнет тело */
+
+    funcs[*func_idx].entry = (unsigned int)code_len;
+    nlocals = 0;
+    in_func = 1;
+
+    expect_op("(");
+    while (cur()->kind == T_NAME) {
+        add_local(next()->text);
+        if (is_op(","))
+            tpos++;
+    }
+    expect_op(")");
+    expect_op(":");
+    block();
+
+    /* Функция без явного возврата всё равно обязана вернуть */
+    emit(OP_PUSH);
+    emit_i32(0);
+    emit(OP_RET);
+
+    funcs[*func_idx].nlocals = (unsigned short)nlocals;
+    in_func = 0;
+    patch(skip, code_len);
+}
+
 static void compile(void)
 {
     int func_idx = 1;
 
+    prescan_classes();
     prescan_funcs();
 
     /* Тело верхнего уровня — нулевая функция */
@@ -822,55 +1207,47 @@ static void compile(void)
             continue;
         }
 
-        if (is_kw("def")) {
+        if (is_kw("class")) {
             /*
-             * Тело функции выдаём тут же, посреди основного кода, а
-             * вход в неё запоминаем. Обходить его не нужно: на верхнем
-             * уровне мы до него не доходим — функции идут после
-             * последней команды программы только в исходнике, а в
-             * байткоде порядок неважен, потому что переход в функцию
-             * всегда явный.
+             * Класс — это только объявление: своего кода у него нет,
+             * есть код его методов. Поля уже собраны предпросмотром,
+             * поэтому здесь мы просто идём по телу и компилируем каждый
+             * метод как обычную функцию, запомнив, чьим он был.
              */
-            int skip;
-
             tpos++;
             if (cur()->kind != T_NAME)
-                die(cur()->line, "после def ожидалось имя");
-            {
-                int f = find_func(cur()->text);
-
-                if (f < 0)
-                    die(cur()->line, "функция не найдена (внутренняя ошибка)");
-                func_idx = f;
-            }
+                die(cur()->line, "после class ожидалось имя");
+            cur_class = find_class(cur()->text);
+            if (cur_class < 0)
+                die(cur()->line, "класс не найден (внутренняя ошибка)");
+            tpos++;
+            expect_op(":");
+            expect_newline();
+            if (cur()->kind != T_INDENT)
+                die(cur()->line, "после класса ожидался сдвинутый блок");
             tpos++;
 
-            skip = emit_jump(OP_JMP);   /* верхний уровень перепрыгнет тело */
-
-            funcs[func_idx].entry = (unsigned int)code_len;
-            nlocals = 0;
-            in_func = 1;
-
-            expect_op("(");
-            while (cur()->kind == T_NAME) {
-                add_local(next()->text);
-                if (is_op(","))
+            while (cur()->kind != T_DEDENT && cur()->kind != T_EOF) {
+                if (cur()->kind == T_NEWLINE) {
                     tpos++;
+                    continue;
+                }
+                if (!is_kw("def"))
+                    die(cur()->line, "в классе бывают только методы");
+                compile_def(&func_idx, cur_class);
             }
-            expect_op(")");
-            expect_op(":");
-            block();
-
-            /* Функция без явного возврата всё равно обязана вернуть */
-            emit(OP_PUSH);
-            emit_i32(0);
-            emit(OP_RET);
-
-            funcs[func_idx].nlocals = (unsigned short)nlocals;
-            in_func = 0;
-            patch(skip, code_len);
+            if (cur()->kind == T_DEDENT)
+                tpos++;
+            cur_class = -1;
             continue;
         }
+
+        if (is_kw("def")) {
+            compile_def(&func_idx, -1);
+            continue;
+        }
+
+
 
         statement();
     }
@@ -940,6 +1317,25 @@ int main(int argc, char **argv)
     h.global_count = (unsigned int)nglobals;
     h.str_bytes = (unsigned int)strlen_used;
     h.code_bytes = (unsigned int)code_len;
+    h.class_count = (unsigned int)nclasses;
+    h.member_count = (unsigned int)nmembers;
+
+    /*
+     * Имена членов уезжают в область строк, и туда же смотрит машина.
+     * Делаем это здесь, а не при разборе: пока классы не дочитаны,
+     * список членов ещё меняется.
+     */
+    {
+        int i;
+
+        for (i = 0; i < nclasses; i++)
+            classes[i].name = (unsigned int)intern(class_name[i],
+                                                   (int)strlen(class_name[i]));
+        for (i = 0; i < nmembers; i++)
+            members[i].name = (unsigned int)intern(member_name[i],
+                                                   (int)strlen(member_name[i]));
+        h.str_bytes = (unsigned int)strlen_used;
+    }
 
     /*
      * Контрольная сумма считается по всему, что после заголовка. Она не
@@ -949,11 +1345,17 @@ int main(int argc, char **argv)
      */
     {
         unsigned char *all = malloc(nfuncs * sizeof(struct slt_func) +
+                                    nclasses * sizeof(struct slt_class) +
+                                    nmembers * sizeof(struct slt_member) +
                                     strlen_used + code_len);
         int at = 0;
 
         memcpy(all + at, funcs, nfuncs * sizeof(struct slt_func));
         at += nfuncs * sizeof(struct slt_func);
+        memcpy(all + at, classes, nclasses * sizeof(struct slt_class));
+        at += nclasses * sizeof(struct slt_class);
+        memcpy(all + at, members, nmembers * sizeof(struct slt_member));
+        at += nmembers * sizeof(struct slt_member);
         memcpy(all + at, strbuf, strlen_used);
         at += strlen_used;
         memcpy(all + at, code, code_len);
@@ -976,5 +1378,8 @@ int main(int argc, char **argv)
     printf("        имя «%s», окно %dx%d\n", h.name, h.win_w, h.win_h);
     printf("        функций %u, глобальных %u, строк %u байт, кода %u байт\n",
            h.func_count, h.global_count, h.str_bytes, h.code_bytes);
+    if (h.class_count)
+        printf("        классов %u, полей и методов %u\n",
+               h.class_count, h.member_count);
     return 0;
 }
