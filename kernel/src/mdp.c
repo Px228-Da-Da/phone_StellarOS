@@ -1,33 +1,29 @@
 /*
- * Двумерный движок: разведка по затворам тактов.
+ * Двумерный движок: разведка и проверка управления.
  *
- * Первая разведка читала блоки подряд и повисла — ровно там, где и
- * предсказывалось: на disp_wdma0. Телефон не умер, но задача пульса
- * встала секунд на сорок (в логе пропали TICK 20, 30 и 40 и вернулся
- * TICK 50), а вывод в это время побился.
+ * Что уже установлено на телефоне.
  *
- * Так и должно было быть. Обращение к блоку без тактов вешает шину, и
- * именно поэтому перед каждым чтением печаталось, куда мы идём. Догадка
- * подтвердилась поимённо.
+ *   1. Раскладка затворов тактов верна. Прочитано 2f85fa7f; по таблице
+ *      mm_clks[] вендора это значит, что живы оверлей, disp_rdma0 и
+ *      dsi0, а вся двумерная цепочка спит. Сходится с наблюдаемым:
+ *      оверлей действительно показывает наш кадр.
  *
- * Теперь угадывать не надо. Раскладка затворов взята из исходника
- * вендора для этого самого чипа — out/ref/clk-mt6768.c, таблица
- * mm_clks[]. Там же и раскладка регистров:
+ *   2. Спящий блок вешает шину. Первая разведка читала подряд и встала
+ *      на disp_wdma0 — том самом, чей затвор стоит единицей. Задача
+ *      пульса пропала на сорок секунд (в логе нет TICK 20, 30 и 40).
  *
- *     static const struct mtk_gate_regs mm_cg_regs = {
- *             .set_ofs = 0x104,   поставить затвор (выключить такты)
- *             .clr_ofs = 0x108,   снять затвор (включить такты)
- *             .sta_ofs = 0x100,   состояние
- *     };
+ *   3. Затворами мы управляем. Сняли три (00000045) — стало 2f85fa3a,
+ *      изменились ровно они и ничего больше. Разбуженные mdp_rdma0,
+ *      mdp_rsz0 и mdp_wdma0 отвечают осмысленными значениями.
  *
- * Единица в состоянии = такты перекрыты, блок спит. Проверяется это на
- * нашем же телефоне: бит 7 (disp_ovl0) стоит в нуле, и оверлей
- * действительно работает — прямо сейчас показывает наш кадр.
+ * Источники в out/ref/, там же в README сверка смещений. Ни одного
+ * числа отсюда не выдумано.
  *
- * Регистра CG_CON1 у блока мультимедиа нет вовсе: в драйвере вендора
- * для mmsys описан один-единственный набор затворов. То, что первая
- * разведка прочитала по 0x110 и назвала «CON1», — что-то другое, и в
- * выводе этого больше нет, чтобы не выдавать случайное число за смысл.
+ * Поправка к прежнему комментарию: регистр 0x110 существует, вендор
+ * называет его «MMSYS Clock Gating Config_1» (cmdq_mdp.c, таблица
+ * configRegisters). Ошибка была в другом: драйвер тактов не заводит в
+ * нём ни одного затвора, поэтому расшифровывать его по mm_clks[]
+ * нельзя. Печатаем как есть, без имён.
  */
 #include "mdp.h"
 #include "io.h"
@@ -36,8 +32,9 @@
 
 #if defined(BOARD_MERLIN)
 
-/* Адреса блоков — из дерева устройства этого телефона (out/stock.dts) */
+/* Адреса блоков — mdp_base-mt6768.h вендора, для этого телефона */
 #define MMSYS_BASE      0x14000000UL
+#define MM_MUTEX_BASE   0x14001000UL
 #define MDP_RDMA0       0x14004000UL
 #define MDP_RSZ0        0x14006000UL
 #define MDP_RSZ1        0x14007000UL
@@ -47,17 +44,31 @@
 #define DISP_WDMA0      0x1400E000UL
 #define DISP_RSZ0       0x14015000UL
 
-/* Затворы тактов блока мультимедиа (mm_cg_regs вендора) */
+/* Затворы тактов (mm_cg_regs вендора: состояние, поставить, снять) */
 #define MMSYS_CG_CON0   0x100
 #define MMSYS_CG_SET0   0x104
 #define MMSYS_CG_CLR0   0x108
 
 /*
- * Номера затворов — из таблицы mm_clks[] вендора, дословно.
+ * Сброс блоков движка (cmdq_mdp_reset_with_mmsys).
  *
- * Держим их здесь все, а не только нужные: по ним читается состояние
- * всего блока, и видно, что ещё спит рядом.
+ * Ноль в бите = блок в сбросе, единица = работает. Номера битов те же,
+ * что у затворов тактов: rdma0 = 0, rsz0 = 2, wdma = 6. Это два разных
+ * файла вендора, сошедшихся на одной нумерации, — лишнее подтверждение,
+ * что таблица прочитана правильно.
  */
+#define MMSYS_SW0_RST_B 0x140
+
+/* Разводка: кто кому отдаёт кадр (configRegisters вендора) */
+#define MMSYS_MDP_RDMA0_MOUT_EN 0xF08
+#define MMSYS_MDP_PRZ0_MOUT_EN  0xF10
+#define MMSYS_MDP_PRZ0_SEL_IN   0xF24
+#define MMSYS_MDP_WDMA_SEL_IN   0xF34
+#define MMSYS_MDP_WROT0_SEL_IN  0xF38
+#define MMSYS_MDP_DL_VALID_0    0xFB0
+#define MMSYS_MDP_DL_READY_0    0xFC0
+
+/* Номера затворов из mm_clks[] вендора, дословно */
 static const char *const gate_name[32] = {
     "mdp_rdma0",   "mdp_ccorr0",  "mdp_rsz0",    "mdp_rsz1",
     "mdp_tdshp0",  "mdp_wrot0",   "mdp_wdma0",   "disp_ovl0",
@@ -69,35 +80,29 @@ static const char *const gate_name[32] = {
     "img_dl_relay","imgdl_async", "dig_dsi",     "hrtwt",
 };
 
-/* Блок движка: где лежит и какой затвор его питает */
 struct block {
     const char *name;
     u64         base;
-    int         gate;
+    int         gate;       /* он же номер бита сброса */
 };
 
-/*
- * Цепочка размытия: прочитать из памяти, уменьшить, записать обратно.
- * Больше нам ничего и не нужно, поэтому будим только это.
- */
+/* Цепочка размытия: прочитать из памяти, уменьшить, записать обратно */
 static const struct block chain[] = {
     { "mdp_rdma0", MDP_RDMA0, 0 },
     { "mdp_rsz0",  MDP_RSZ0,  2 },
     { "mdp_wdma0", MDP_WDMA0, 6 },
 };
-
-/* Остальное только смотрим, если оно и так не спит */
-static const struct block nearby[] = {
-    { "disp_rdma0", DISP_RDMA0, 10 },
-    { "disp_wdma0", DISP_WDMA0, 11 },
-    { "disp_rsz0",  DISP_RSZ0,   9 },
-    { "mdp_rsz1",   MDP_RSZ1,    3 },
-    { "mdp_wrot0",  MDP_WROT0,   5 },
-};
+#define CHAIN_N (sizeof(chain) / sizeof(chain[0]))
 
 static u32 gates(void)
 {
     return mmio_read32(MMSYS_BASE + MMSYS_CG_CON0);
+}
+
+static void show(const char *name, u32 off)
+{
+    kprintf("MDP      :   %-18s (%03x) %08x\n",
+            name, off, mmio_read32(MMSYS_BASE + off));
 }
 
 /* Прочитать четыре слова блока. Вызывать только когда такты поданы. */
@@ -105,95 +110,112 @@ static void peek(const struct block *b)
 {
     u32 v[4];
 
-    kprintf("MDP      : ЧИТАЮ %s ПО 0x%08lx...\n", b->name, b->base);
-    usb_flush();
-
     v[0] = mmio_read32(b->base + 0x00);
     v[1] = mmio_read32(b->base + 0x04);
     v[2] = mmio_read32(b->base + 0x08);
     v[3] = mmio_read32(b->base + 0x0C);
 
-    kprintf("MDP      : %s: %08x %08x %08x %08x\n",
+    kprintf("MDP      :   %-10s %08x %08x %08x %08x\n",
             b->name, v[0], v[1], v[2], v[3]);
-    usb_flush();
-}
-
-/* Прочитать, но только если блок не спит */
-static void peek_if_awake(const struct block *b, u32 cg)
-{
-    if (cg & (1U << b->gate)) {
-        kprintf("MDP      : %s СПИТ (затвор %d), НЕ ТРОГАЮ\n",
-                b->name, b->gate);
-        usb_flush();
-        return;
-    }
-    peek(b);
 }
 
 void mdp_probe(void)
 {
     static int told;
-    u32 cg, want;
+    u32 cg, want, rst, held;
 
     if (told)
         return;
     told = 1;
 
     cg = gates();
-
-    kprintf("MDP      : ЗАТВОРЫ ТАКТОВ: %08x (1 = СПИТ)\n", cg);
+    kprintf("MDP      : ЗАТВОРЫ ТАКТОВ %08x (1 = СПИТ)\n", cg);
     for (int i = 0; i < 32; i++)
         if (!(cg & (1U << i)))
-            kprintf("MDP      :   ЖИВ  %2d %s\n", i, gate_name[i]);
-    usb_flush();
+            kprintf("MDP      :   ЖИВ %2d %s\n", i, gate_name[i]);
 
     /*
-     * Сверка, ради которой всё и затевалось: оверлей у нас работает,
-     * значит его затвор обязан стоять в нуле. Если нет — раскладка
-     * прочитана неправильно, и будить по ней ничего нельзя.
+     * Сверка перед любым действием: оверлей показывает кадр прямо
+     * сейчас, значит его затвор обязан читаться нулём. Не читается —
+     * таблица понята неправильно, и по ней ничего нельзя ни будить, ни
+     * сбрасывать.
      */
     if (cg & (1U << 7)) {
         kprintf("MDP      : СВЕРКА НЕ ПРОШЛА: disp_ovl0 ЧИСЛИТСЯ СПЯЩИМ,\n");
-        kprintf("MDP      : А ОН ПОКАЗЫВАЕТ КАДР. РАСКЛАДКА НЕВЕРНА, СТОЮ.\n");
+        kprintf("MDP      : А ОН ПОКАЗЫВАЕТ КАДР. ТАБЛИЦА НЕВЕРНА, СТОЮ.\n");
         usb_flush();
         return;
     }
-    kprintf("MDP      : СВЕРКА: disp_ovl0 ЖИВ, КАК И ДОЛЖЕН. РАСКЛАДКА ВЕРНА.\n");
-    usb_flush();
 
-    /* Что рядом — смотрим, не будя */
-    for (unsigned i = 0; i < sizeof(nearby) / sizeof(nearby[0]); i++)
-        peek_if_awake(&nearby[i], cg);
-
-    /*
-     * Будим цепочку размытия.
-     *
-     * Это первая запись за всю разведку, и она самая безобидная из
-     * возможных: подать блоку такты. Питание у него уже есть — оно
-     * общее с оверлеем, который работает. Разбуженный блок ничего не
-     * делает сам, он просто перестаёт быть мёртвым для чтения.
-     */
+    /* Будим цепочку, если она ещё спит */
     want = 0;
-    for (unsigned i = 0; i < sizeof(chain) / sizeof(chain[0]); i++)
+    for (unsigned i = 0; i < CHAIN_N; i++)
         want |= 1U << chain[i].gate;
 
-    kprintf("MDP      : БУЖУ ЦЕПОЧКУ, СНИМАЮ ЗАТВОРЫ %08x\n", want);
-    usb_flush();
-    mmio_write32(MMSYS_BASE + MMSYS_CG_CLR0, want);
-
-    cg = gates();
-    kprintf("MDP      : ЗАТВОРЫ СТАЛИ: %08x\n", cg);
+    if (cg & want) {
+        mmio_write32(MMSYS_BASE + MMSYS_CG_CLR0, want);
+        cg = gates();
+        kprintf("MDP      : РАЗБУДИЛ ЦЕПОЧКУ, ЗАТВОРЫ СТАЛИ %08x\n", cg);
+    }
+    if (cg & want) {
+        kprintf("MDP      : ЦЕПОЧКА НЕ ПРОСНУЛАСЬ, ДАЛЬШЕ НЕ ИДУ\n");
+        usb_flush();
+        return;
+    }
     usb_flush();
 
     /*
-     * Читаем только то, что действительно проснулось. Если затвор не
-     * снялся, блок остался мёртвым, и лезть в него — снова повесить
-     * шину на сорок секунд.
+     * Разводка. Это то, чего нам не хватает, чтобы соединить блоки в
+     * цепочку: какие регистры сейчас говорят, кто кому отдаёт кадр.
+     * Пока только читаем — надо знать, от чего отталкиваться.
      */
-    for (unsigned i = 0; i < sizeof(chain) / sizeof(chain[0]); i++)
-        peek_if_awake(&chain[i], cg);
+    kprintf("MDP      : РАЗВОДКА В MMSYS СЕЙЧАС:\n");
+    show("CG_CON0",       MMSYS_CG_CON0);
+    show("CG_CON1",       0x110);
+    show("SW0_RST_B",     MMSYS_SW0_RST_B);
+    show("RDMA0_MOUT_EN", MMSYS_MDP_RDMA0_MOUT_EN);
+    show("PRZ0_MOUT_EN",  MMSYS_MDP_PRZ0_MOUT_EN);
+    show("PRZ0_SEL_IN",   MMSYS_MDP_PRZ0_SEL_IN);
+    show("WDMA_SEL_IN",   MMSYS_MDP_WDMA_SEL_IN);
+    show("WROT0_SEL_IN",  MMSYS_MDP_WROT0_SEL_IN);
+    show("DL_VALID_0",    MMSYS_MDP_DL_VALID_0);
+    show("DL_READY_0",    MMSYS_MDP_DL_READY_0);
+    usb_flush();
 
-    kprintf("MDP      : РАЗВЕДКА ЗАКОНЧЕНА\n");
+    kprintf("MDP      : БЛОКИ ДО СБРОСА:\n");
+    for (unsigned i = 0; i < CHAIN_N; i++)
+        peek(&chain[i]);
+    usb_flush();
+
+    /*
+     * Сброс цепочки. Проверка того, что мы блоками действительно
+     * управляем, а не просто смотрим на них.
+     *
+     * Вендор в этом месте пишет в регистр целиком: сначала ~наши_биты,
+     * потом ~0. Второе слово выводит из сброса вообще всё, включая
+     * экранные блоки. Нам это не нужно и рисковать нечем: читаем, гасим
+     * только свои три бита, возвращаем прочитанное. Экран при этом даже
+     * не узнает, что рядом что-то происходило.
+     */
+    held = mmio_read32(MMSYS_BASE + MMSYS_SW0_RST_B);
+    rst = 0;
+    for (unsigned i = 0; i < CHAIN_N; i++)
+        rst |= 1U << chain[i].gate;
+
+    kprintf("MDP      : СБРОС ЦЕПОЧКИ (БЫЛО %08x, ГАШУ БИТЫ %08x)\n",
+            held, rst);
+    usb_flush();
+
+    mmio_write32(MMSYS_BASE + MMSYS_SW0_RST_B, held & ~rst);
+    mmio_write32(MMSYS_BASE + MMSYS_SW0_RST_B, held);
+
+    kprintf("MDP      : СБРОС СНЯТ, СТАЛО %08x\n",
+            mmio_read32(MMSYS_BASE + MMSYS_SW0_RST_B));
+    kprintf("MDP      : БЛОКИ ПОСЛЕ СБРОСА:\n");
+    for (unsigned i = 0; i < CHAIN_N; i++)
+        peek(&chain[i]);
+
+    kprintf("MDP      : РАЗВЕДКА ЗАКОНЧЕНА, ЭКРАН НЕ ТРОНУТ\n");
     usb_flush();
 }
 
