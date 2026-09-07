@@ -103,6 +103,37 @@ static const struct block chain[] = {
 };
 #define CHAIN_N (sizeof(chain) / sizeof(chain[0]))
 
+/*
+ * Мультиплексоры разводки, все подряд и по порядку.
+ *
+ * Список и имена — из configRegisters вендора для MT6768. Смещения идут
+ * сплошняком через четыре байта: сначала «кому отдавать» (F04..F1C),
+ * потом «у кого брать» (F20..F38). Набор беднее, чем у MT8183: ни AAL,
+ * ни IPU, ни PATH0/PATH1 — у вендора они закомментированы.
+ */
+struct mux_reg {
+    const char *name;
+    u32         off;
+};
+
+static const struct mux_reg mux[] = {
+    { "ISP_MOUT_EN      ", 0xF04 },
+    { "RDMA0_MOUT_EN    ", 0xF08 },
+    { "CCORR_MOUT_EN    ", 0xF0C },
+    { "PRZ0_MOUT_EN     ", 0xF10 },
+    { "PRZ1_MOUT_EN     ", 0xF14 },
+    { "TDSHP_SOUT_SEL   ", 0xF18 },
+    { "COLOR_MOUT_EN    ", 0xF1C },
+    { "CCORR_SEL_IN     ", 0xF20 },
+    { "PRZ0_SEL_IN      ", 0xF24 },
+    { "PRZ1_SEL_IN      ", 0xF28 },
+    { "TDSHP_SEL_IN     ", 0xF2C },
+    { "COLOR_OUT_SEL_IN ", 0xF30 },
+    { "WDMA_SEL_IN      ", 0xF34 },
+    { "WROT0_SEL_IN     ", 0xF38 },
+};
+#define MUX_N (sizeof(mux) / sizeof(mux[0]))
+
 static u32 gates(void)
 {
     return mmio_read32(MMSYS_BASE + MMSYS_CG_CON0);
@@ -198,6 +229,41 @@ void mdp_probe(void)
     show("WROT0_SEL_IN  ", MMSYS_MDP_WROT0_SEL_IN);
     show("DL_VALID_0    ", MMSYS_MDP_DL_VALID_0);
     show("DL_READY_0    ", MMSYS_MDP_DL_READY_0);
+    usb_flush();
+
+    /*
+     * Ширина мультиплексоров.
+     *
+     * Соединить блоки в цепочку мешает последнее незнание: чем именно
+     * записывается «rdma0 отдаёт кадр вот этому». По соседнему чипу
+     * (MT8183, патч в ядро «soc: mediatek: mmsys: Add support for MDP»)
+     * видно соглашение: MOUT_EN — маска, по биту на получателя; SEL_IN —
+     * просто номер источника. Но у MT8183 и смещения другие, и набор
+     * блоков богаче, так что переносить оттуда сами числа было бы
+     * гаданием.
+     *
+     * Зато ширину можно измерить. Пишем во все разряды единицы и читаем
+     * обратно: железо оставит только те, которые у него есть. Сколько
+     * бит вернулось у MOUT_EN — столько у блока получателей; какое
+     * наибольшее число вернулось у SEL_IN — столько у него источников.
+     * Это уже не догадка, а замер, и он режет перебор до считаных
+     * вариантов.
+     *
+     * Безопасно: блоки выключены и ничего не передают, а прежние
+     * значения кладём обратно и печатаем, что положили.
+     */
+    kprintf("MDP      : ШИРИНА МУЛЬТИПЛЕКСОРОВ:\n");
+    for (unsigned i = 0; i < MUX_N; i++) {
+        u32 keep = mmio_read32(MMSYS_BASE + mux[i].off);
+
+        mmio_write32(MMSYS_BASE + mux[i].off, 0xFFFFFFFF);
+        got = mmio_read32(MMSYS_BASE + mux[i].off);
+        mmio_write32(MMSYS_BASE + mux[i].off, keep);
+
+        kprintf("MDP      :   %s (%03x) РАЗРЯДЫ %08x, ВЕРНУЛ %08x\n",
+                mux[i].name, mux[i].off, got,
+                mmio_read32(MMSYS_BASE + mux[i].off));
+    }
     usb_flush();
 
     kprintf("MDP      : ПЕРВЫЕ ЧЕТЫРЕ СЛОВА КАЖДОГО БЛОКА:\n");
