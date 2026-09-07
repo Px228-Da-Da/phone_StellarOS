@@ -11,6 +11,7 @@
 #include "fb.h"
 #include "font.h"
 #include "splash.h"
+#include "appload.h"
 #include "uiarea.h"
 #include "battery.h"
 #include "window.h"
@@ -1973,6 +1974,9 @@ static void boot_task(void *arg)
      */
     splash_wait_gone();
     ui_status_start();
+
+    /* Провод слушает приложения: новое приезжает без пересборки системы */
+    appload_start();
 
     /*
      * С этого мгновения в системные полосы пишут только часы и заряд, и

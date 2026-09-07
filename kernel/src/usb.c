@@ -292,6 +292,9 @@ void usb_probe(void)
 #define MUSB_CSR0           0x12    /* 16 бит */
 #define MUSB_COUNT0         0x18    /* 8  бит */
 #define MUSB_TXMAXP         0x10
+#define MUSB_RXMAXP         0x14
+#define MUSB_RXCSR          0x16
+#define MUSB_RXCOUNT        0x18
 #define MUSB_TXCSR          0x12    /* тот же адрес, когда INDEX не ноль */
 #define MUSB_FIFO(ep)       (0x20 + 4 * (ep))
 
@@ -303,6 +306,11 @@ void usb_probe(void)
 #define CSR0_SENDSTALL      0x0020
 #define CSR0_SVDRXPKTRDY    0x0040
 #define CSR0_SVDSETUPEND    0x0080
+
+#define RXCSR_RXPKTRDY      0x0001
+#define RXCSR_OVERRUN       0x0004
+#define RXCSR_FLUSHFIFO     0x0010
+#define RXCSR_CLRDATATOG    0x0080
 
 #define TXCSR_TXPKTRDY      0x0001
 #define TXCSR_FLUSHFIFO     0x0008
@@ -454,6 +462,23 @@ static void bulk_setup(void)
     mmio_write16(USB_BASE + MUSB_TXMAXP, EP_BULK_MAXP);
     mmio_write16(USB_BASE + MUSB_TXCSR, TXCSR_FLUSHFIFO | TXCSR_CLRDATATOG);
 
+    /*
+     * Приёмная половина той же точки.
+     *
+     * Хосту мы её объявляли с самого начала — она есть в дескрипторе, —
+     * но никогда не настраивали и не читали. Пока в неё никто не писал,
+     * это сходило с рук; стоило бы компьютеру отправить хоть байт, и
+     * очередь заполнилась бы навсегда.
+     *
+     * Смещения приёмных регистров взяты из драйвера Linux
+     * (drivers/usb/musb/musb_regs.h): относительно блока точки TXMAXP
+     * лежит на 0x00, RXMAXP на 0x04, RXCSR на 0x06, RXCOUNT на 0x08.
+     * Наши рабочие 0x10 и 0x12 для передачи с этим сходятся — значит
+     * блок начинается с 0x10, отсюда 0x14, 0x16 и 0x18.
+     */
+    mmio_write16(USB_BASE + MUSB_RXMAXP, EP_BULK_MAXP);
+    mmio_write16(USB_BASE + MUSB_RXCSR, RXCSR_FLUSHFIFO | RXCSR_CLRDATATOG);
+
     mmio_write8(USB_BASE + MUSB_INDEX, 0);
 }
 
@@ -576,6 +601,83 @@ static void ep0_setup(const u8 *p)
  * Вызывать почаще: пока мы не ответим, хост ждёт, а по истечении времени
  * объявит устройство неисправным.
  */
+/*
+ * Что пришло от компьютера.
+ *
+ * Кольцо, а не разбор на месте: чтение идёт из обработчика прерывания
+ * таймера, и делать там что-либо кроме «забрать байты и уйти» нельзя.
+ * Разбирает принятое отдельная задача, в своё время.
+ */
+#define USB_RX_RING     4096
+
+static u8  rx_ring[USB_RX_RING];
+static u32 rx_head, rx_tail;
+static u32 rx_lost;
+
+static void rx_put(u8 c)
+{
+    u32 next = (rx_head + 1) % USB_RX_RING;
+
+    if (next == rx_tail) {
+        rx_lost++;              /* читатель не поспевает */
+        return;
+    }
+    rx_ring[rx_head] = c;
+    rx_head = next;
+}
+
+/*
+ * Забрать пакет из приёмной очереди, если он там есть.
+ *
+ * Окно регистров у точек одно на всех, поэтому INDEX трогаем только под
+ * замком и возвращаем на ноль за собой — как и везде здесь.
+ */
+static void usb_rx_locked(void)
+{
+    u16 csr;
+
+    if (!usb_configured)
+        return;
+
+    mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+    csr = mmio_read16(USB_BASE + MUSB_RXCSR);
+
+    if (csr & RXCSR_RXPKTRDY) {
+        u16 n = mmio_read16(USB_BASE + MUSB_RXCOUNT);
+
+        for (u16 i = 0; i < n; i++) {
+            u8 c;
+
+            fifo_read(EP_BULK, &c, 1);
+            rx_put(c);
+        }
+        /* Снимаем признак: иначе очередь так и останется занятой */
+        mmio_write16(USB_BASE + MUSB_RXCSR, 0);
+    } else if (csr & RXCSR_OVERRUN) {
+        mmio_write16(USB_BASE + MUSB_RXCSR, 0);
+        rx_lost++;
+    }
+
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
+}
+
+/* Взять принятый байт. 0 — пока ничего нет. */
+int usb_recv(u8 *out)
+{
+    u64 flags = spin_lock_irq(&usb_lock);
+    int got = 0;
+
+    if (rx_tail != rx_head) {
+        *out = rx_ring[rx_tail];
+        rx_tail = (rx_tail + 1) % USB_RX_RING;
+        got = 1;
+    }
+    spin_unlock_irq(&usb_lock, flags);
+    return got;
+}
+
+u32 usb_rx_lost(void) { return rx_lost; }
+
 static void usb_poll_locked(void)
 {
     u16 csr;
@@ -643,6 +745,7 @@ void usb_poll(void)
 
     flags = spin_lock_irq(&usb_lock);
     usb_poll_locked();
+    usb_rx_locked();
     /* Отдаём накопленное здесь, а не в самой печати: usb_send_locked
      * в ожидании вызывает обслуживание нулевой точки, и вызов отдачи
      * оттуда же ушёл бы в бесконечную рекурсию. */
@@ -829,4 +932,6 @@ int  usb_ready(void) { return 0; }
 void usb_putc(char c) { (void)c; }
 void usb_flush(void) { }
 void usb_watch(u32 s) { (void)s; }
+int  usb_recv(u8 *out) { (void)out; return 0; }
+u32  usb_rx_lost(void) { return 0; }
 #endif

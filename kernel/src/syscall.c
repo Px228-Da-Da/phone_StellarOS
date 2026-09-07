@@ -14,6 +14,7 @@
  */
 #include "syscall.h"
 #include "psci.h"
+#include "appload.h"
 #include "sched.h"
 #include "timer.h"
 #include "print.h"
@@ -333,6 +334,34 @@ static void syscall(struct trapframe *f)
      * делает прошивка в EL3, и если она не умеет, честнее сказать об
      * этом программе, чем оставить телефон включённым и молчать.
      */
+    /*
+     * Отдать программе приложение, присланное по проводу.
+     *
+     * Копируем, а не показываем адрес: буфер приёма живёт в памяти
+     * ядра, и давать на него ссылку в EL0 значит открыть туда дверь.
+     * Три килобайта копии стоят дешевле дыры.
+     */
+    case SYS_APP: {
+        const u8 *img;
+        u32 len = 0;
+
+        img = appload_image(&len);
+        if (!img || !len || !f->x[1] || len > f->x[1]) {
+            f->x[0] = 0;
+            return;
+        }
+        /* Проверяем оба конца, как и все остальные вызовы: указатель
+         * пришёл из программы, и верить ему нельзя. */
+        if (!user_can_write(f->x[0]) ||
+            !user_can_write(f->x[0] + len - 1)) {
+            f->x[0] = 0;
+            return;
+        }
+        memcpy((void *)(uintptr_t)f->x[0], img, len);
+        f->x[0] = len;
+        return;
+    }
+
     case SYS_POWEROFF:
         kprintf("EL0      : %s ПРОСИТ ВЫКЛЮЧЕНИЕ\n", task_name());
         f->x[0] = (u64)machine_power_off();
