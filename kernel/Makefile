@@ -132,7 +132,7 @@ $(BUILD)/host/fontgen: ../tools/fontgen.c
 
 $(BUILD)/font/manrope.stf: ../fonts/Manrope-SemiBold.ttf $(BUILD)/host/fontgen
 	@mkdir -p $(BUILD)/font
-	$(BUILD)/host/fontgen $< 16,24,32,48,102:StellarOS,150:StellarOS $@
+	$(BUILD)/host/fontgen $< 16,24,32,48,102:StellarOS,150:StellarOS,190:0123456789: $@
 
 # font_data.S вшивает шрифт, поэтому пересобирается вместе с ним
 $(BUILD)/font_data.o: $(BUILD)/font/manrope.stf

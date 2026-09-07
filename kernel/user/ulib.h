@@ -172,6 +172,24 @@ static inline s64 text(u32 x, u32 y, u32 scale, u32 fg, u32 bg,
  * неверно. Раньше ширину сообщал только сам вывод текста, и узнать её
  * заранее было нельзя; разметка от этого получалась на глаз.
  */
+/*
+ * Время суток. Возвращает -1, если часов нет (эмулятор).
+ *
+ * Упаковано в одно число нарочно: системный вызов отдаёт один регистр, а
+ * складывать структуру в память программы значило бы заводить проверку
+ * чужого адреса ради шести байт.
+ */
+static inline s64 clock_now(void)
+{
+    return sys(SYS_CLOCK, 0, 0, 0, 0, 0, 0);
+}
+
+#define CLOCK_HOUR(v)   ((u32)(((u64)(v) >> 40) & 0xFF))
+#define CLOCK_MIN(v)    ((u32)(((u64)(v) >> 32) & 0xFF))
+#define CLOCK_SEC(v)    ((u32)(((u64)(v) >> 24) & 0xFF))
+#define CLOCK_DAY(v)    ((u32)(((u64)(v) >> 16) & 0xFF))
+#define CLOCK_MONTH(v)  ((u32)(((u64)(v) >> 8) & 0xFF))
+
 static inline s64 textw(u32 scale, const char *s)
 {
     return sys(SYS_TEXTW, scale, (u64)s, ustrlen(s), 0, 0, 0);

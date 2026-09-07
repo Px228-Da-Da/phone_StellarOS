@@ -14,6 +14,7 @@
  */
 #include "syscall.h"
 #include "psci.h"
+#include "rtc.h"
 #include "appload.h"
 #include "sched.h"
 #include "timer.h"
@@ -340,6 +341,25 @@ static void syscall(struct trapframe *f)
         f->x[0] = (u64)(s64)sys_text(f->x[0], f->x[1], f->x[2], f->x[3],
                                      f->x[4], f->x[5]);
         return;
+
+    /*
+     * Время суток. Читается на каждый запрос, а не кэшируется: обмен с
+     * контроллером питания идёт по своей шине и стоит микросекунды, а
+     * кэш пришлось бы обновлять по таймеру и он всё равно врал бы на
+     * секунду.
+     */
+    case SYS_CLOCK: {
+        struct rtc_time t;
+
+        if (rtc_now(&t) != 0) {
+            f->x[0] = (u64)-1;
+            return;
+        }
+        f->x[0] = ((u64)t.hour << 40) | ((u64)t.min << 32) |
+                  ((u64)t.sec << 24) | ((u64)t.day << 16) |
+                  ((u64)t.month << 8) | (u64)t.year;
+        return;
+    }
 
     case SYS_TEXTW:
         f->x[0] = (u64)(s64)sys_textw(f->x[0], f->x[1], f->x[2]);
