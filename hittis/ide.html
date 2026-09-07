@@ -359,8 +359,7 @@ async function tick(){
     const e = await (await fetch('/err')).text();
     if (e !== lastErr){
       lastErr = e;
-      const nl = e.indexOf('
-');
+      const nl = e.indexOf(String.fromCharCode(10));
       const bad = e.slice(0, nl < 0 ? e.length : nl).trim() === 'ошибка';
       const body = nl < 0 ? '' : e.slice(nl + 1);
 

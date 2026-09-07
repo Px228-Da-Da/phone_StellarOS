@@ -27,7 +27,8 @@ preview: preview.c vm.c vm.h slt.h manrope.stf ide_html.h
 # она попадает массивом байт. Иначе разметку пришлось бы писать строковым
 # литералом в C — без подсветки, без отступов и без возможности открыть
 # её в браузере отдельно.
-ide_html.h: ide.html bin2c.c
+ide_html.h: ide.html bin2c.c ../tools/jscheck.py
+	python3 ../tools/jscheck.py ide.html
 	$(CC) $(CFLAGS) -o /tmp/hittis-bin2c bin2c.c
 	/tmp/hittis-bin2c ide.html ide_html > $@
 
