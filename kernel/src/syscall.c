@@ -17,6 +17,7 @@
 #include "rtc.h"
 #include "pmic.h"
 #include "ovl.h"
+#include "backlight.h"
 #include "appload.h"
 #include "sched.h"
 #include "timer.h"
@@ -396,6 +397,18 @@ static void syscall(struct trapframe *f)
     case SYS_BLANK:
         ovl_blank(f->x[0] ? 1 : 0);
         f->x[0] = 0;
+        return;
+
+    /*
+     * Яркость подсветки. 255 означает «не меняй, только скажи» — так
+     * один вызов и задаёт, и спрашивает, а заводить ради чтения второй
+     * номер не приходится. Ответ всегда текущая яркость в процентах или
+     * -1, если управлять ею нечем.
+     */
+    case SYS_BRIGHT:
+        if (f->x[0] != 255)
+            backlight_level((u32)f->x[0]);
+        f->x[0] = (u64)(s64)backlight_percent();
         return;
 
     case SYS_TEXTW:

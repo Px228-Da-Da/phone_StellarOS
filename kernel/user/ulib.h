@@ -207,6 +207,25 @@ static inline s64 screen_blank(u32 on)
     return sys(SYS_BLANK, on, 0, 0, 0, 0, 0);
 }
 
+/*
+ * Яркость подсветки, 0..100 процентов. Возвращает ставшую яркость или
+ * -1, если управлять ею нечем.
+ *
+ * Ноль не гасит совсем — для этого есть screen_blank. Просьба сделать
+ * экран невидимым и просьба его выключить это разные вещи, и путать их
+ * не стоит: после первой человек не догадается, что телефон работает.
+ */
+static inline s64 screen_bright(u32 percent)
+{
+    return sys(SYS_BRIGHT, percent, 0, 0, 0, 0, 0);
+}
+
+/* Какая яркость сейчас, ничего не меняя */
+static inline s64 screen_bright_get(void)
+{
+    return sys(SYS_BRIGHT, 255, 0, 0, 0, 0, 0);
+}
+
 static inline s64 textw(u32 scale, const char *s)
 {
     return sys(SYS_TEXTW, scale, (u64)s, ustrlen(s), 0, 0, 0);

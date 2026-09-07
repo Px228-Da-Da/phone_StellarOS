@@ -52,7 +52,8 @@
 #define SYS_PWRKEY      21      /* bylo li nazhatie knopki pitaniya:      */
                                 /* 1 - da, i priznak snimaetsya           */
 #define SYS_BLANK       22      /* x0: 1 pogasit ekran, 0 vernut          */
-#define SYS_COUNT       23
+#define SYS_BRIGHT      23      /* x0: yarkost 0..100%, 255 = tolko sprosit */
+#define SYS_COUNT       24
 
 /*
  * Событие касания в том виде, в каком его получает EL0.
