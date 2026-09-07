@@ -68,17 +68,6 @@
 #define MMSYS_MDP_DL_VALID_0    0xFB0
 #define MMSYS_MDP_DL_READY_0    0xFC0
 
-/* Номера затворов из mm_clks[] вендора, дословно */
-static const char *const gate_name[32] = {
-    "mdp_rdma0",   "mdp_ccorr0",  "mdp_rsz0",    "mdp_rsz1",
-    "mdp_tdshp0",  "mdp_wrot0",   "mdp_wdma0",   "disp_ovl0",
-    "disp_ovl0_2l","disp_rsz0",   "disp_rdma0",  "disp_wdma0",
-    "disp_color0", "disp_ccorr0", "disp_aal0",   "disp_gamma0",
-    "disp_dither0","dsi0",        "fake_eng",    "smi_common",
-    "smi_larb0",   "smi_comm0",   "smi_comm1",   "cam_mdp",
-    "smi_img",     "smi_cam",     "smi_venc",    "smi_vdec",
-    "img_dl_relay","imgdl_async", "dig_dsi",     "hrtwt",
-};
 
 struct block {
     const char *name;
@@ -103,69 +92,12 @@ static const struct block chain[] = {
 };
 #define CHAIN_N (sizeof(chain) / sizeof(chain[0]))
 
-/*
- * Мультиплексоры разводки, все подряд и по порядку.
- *
- * Список и имена — из configRegisters вендора для MT6768. Смещения идут
- * сплошняком через четыре байта: сначала «кому отдавать» (F04..F1C),
- * потом «у кого брать» (F20..F38). Набор беднее, чем у MT8183: ни AAL,
- * ни IPU, ни PATH0/PATH1 — у вендора они закомментированы.
- */
-struct mux_reg {
-    const char *name;
-    u32         off;
-};
-
-static const struct mux_reg mux[] = {
-    { "ISP_MOUT_EN      ", 0xF04 },
-    { "RDMA0_MOUT_EN    ", 0xF08 },
-    { "CCORR_MOUT_EN    ", 0xF0C },
-    { "PRZ0_MOUT_EN     ", 0xF10 },
-    { "PRZ1_MOUT_EN     ", 0xF14 },
-    { "TDSHP_SOUT_SEL   ", 0xF18 },
-    { "COLOR_MOUT_EN    ", 0xF1C },
-    { "CCORR_SEL_IN     ", 0xF20 },
-    { "PRZ0_SEL_IN      ", 0xF24 },
-    { "PRZ1_SEL_IN      ", 0xF28 },
-    { "TDSHP_SEL_IN     ", 0xF2C },
-    { "COLOR_OUT_SEL_IN ", 0xF30 },
-    { "WDMA_SEL_IN      ", 0xF34 },
-    { "WROT0_SEL_IN     ", 0xF38 },
-};
-#define MUX_N (sizeof(mux) / sizeof(mux[0]))
 
 static u32 gates(void)
 {
     return mmio_read32(MMSYS_BASE + MMSYS_CG_CON0);
 }
 
-/*
- * Имена выровнены пробелами прямо в тексте, а не шириной поля.
- *
- * Наш kprintf разбирает у формата только ноль и ширину, а флаг «влево»
- * не понимает вовсе: "%-18s" он печатает буквально и на этом сбивается
- * со счёта аргументов. Один раз уже сбился — весь отчёт о разводке
- * вышел мусором: вместо значений печатались указатели на имена.
- */
-static void show(const char *name, u32 off)
-{
-    kprintf("MDP      :   %s (%03x) %08x\n",
-            name, off, mmio_read32(MMSYS_BASE + off));
-}
-
-/* Прочитать четыре слова блока. Вызывать только когда такты поданы. */
-static void peek(const struct block *b)
-{
-    u32 v[4];
-
-    v[0] = mmio_read32(b->base + 0x00);
-    v[1] = mmio_read32(b->base + 0x04);
-    v[2] = mmio_read32(b->base + 0x08);
-    v[3] = mmio_read32(b->base + 0x0C);
-
-    kprintf("MDP      :   %s %08x %08x %08x %08x\n",
-            b->name, v[0], v[1], v[2], v[3]);
-}
 
 /*
  * Разводка экранной половины. Здесь она вся, поимённо.
@@ -273,29 +205,41 @@ static void disp_routes(void)
     usb_flush();
 }
 
+/*
+ * Отчёт печатается трижды, а не один раз.
+ *
+ * Один раз мы уже пробовали, и он не дошёл: разведка идёт на десятой
+ * секунде, а кольцо консоли шестнадцать килобайт, и пока терминал
+ * подключали, отчёт вытеснило загрузочным выводом. Тот же случай, что
+ * когда-то с отчётом о шине.
+ *
+ * Поэтому читающая часть повторяется в первых трёх пульсах, то есть
+ * первые полминуты: подключился в любой момент — увидел. Действия же
+ * (разбудить такты) остаются разовыми.
+ *
+ * Отсюда же убрана вся отработавшая диагностика: проба записи, сброс и
+ * замер ширины мультиплексоров. Они свои ответы дали и записаны в
+ * docs/09, а в логе занимали место, которого не хватало живому.
+ */
 void mdp_probe(void)
 {
-    static int told;
-    u32 cg, want, rst, held, got;
-    u32 was[CHAIN_N];
+    static int woken;
+    static int reports;
+    u32 cg, want;
 
-    if (told)
+    if (reports >= 3)
         return;
-    told = 1;
+    reports++;
 
     disp_routes();
 
     cg = gates();
     kprintf("MDP      : ЗАТВОРЫ ТАКТОВ %08x (1 = СПИТ)\n", cg);
-    for (int i = 0; i < 32; i++)
-        if (!(cg & (1U << i)))
-            kprintf("MDP      :   ЖИВ %2d %s\n", i, gate_name[i]);
 
     /*
      * Сверка перед любым действием: оверлей показывает кадр прямо
      * сейчас, значит его затвор обязан читаться нулём. Не читается —
-     * таблица понята неправильно, и по ней ничего нельзя ни будить, ни
-     * сбрасывать.
+     * таблица понята неправильно, и будить по ней ничего нельзя.
      */
     if (cg & (1U << 7)) {
         kprintf("MDP      : СВЕРКА НЕ ПРОШЛА: disp_ovl0 ЧИСЛИТСЯ СПЯЩИМ,\n");
@@ -304,143 +248,16 @@ void mdp_probe(void)
         return;
     }
 
-    /* Будим цепочку, если она ещё спит */
     want = 0;
     for (unsigned i = 0; i < CHAIN_N; i++)
         want |= 1U << chain[i].gate;
 
-    if (cg & want) {
+    if (!woken && (cg & want)) {
+        woken = 1;
         mmio_write32(MMSYS_BASE + MMSYS_CG_CLR0, want);
         cg = gates();
         kprintf("MDP      : РАЗБУДИЛ ЦЕПОЧКУ, ЗАТВОРЫ СТАЛИ %08x\n", cg);
     }
-    if (cg & want) {
-        kprintf("MDP      : ЦЕПОЧКА НЕ ПРОСНУЛАСЬ, ДАЛЬШЕ НЕ ИДУ\n");
-        usb_flush();
-        return;
-    }
-    usb_flush();
-
-    /*
-     * Разводка. Это то, чего нам не хватает, чтобы соединить блоки в
-     * цепочку: какие регистры сейчас говорят, кто кому отдаёт кадр.
-     * Пока только читаем — надо знать, от чего отталкиваться.
-     */
-    kprintf("MDP      : РАЗВОДКА В MMSYS СЕЙЧАС:\n");
-    show("CG_CON0       ", MMSYS_CG_CON0);
-    show("CG_CON1       ", 0x110);
-    show("SW0_RST_B     ", MMSYS_SW0_RST_B);
-    show("RDMA0_MOUT_EN ", MMSYS_MDP_RDMA0_MOUT_EN);
-    show("PRZ0_MOUT_EN  ", MMSYS_MDP_PRZ0_MOUT_EN);
-    show("PRZ0_SEL_IN   ", MMSYS_MDP_PRZ0_SEL_IN);
-    show("WDMA_SEL_IN   ", MMSYS_MDP_WDMA_SEL_IN);
-    show("WROT0_SEL_IN  ", MMSYS_MDP_WROT0_SEL_IN);
-    show("DL_VALID_0    ", MMSYS_MDP_DL_VALID_0);
-    show("DL_READY_0    ", MMSYS_MDP_DL_READY_0);
-    usb_flush();
-
-    /*
-     * Ширина мультиплексоров.
-     *
-     * Соединить блоки в цепочку мешает последнее незнание: чем именно
-     * записывается «rdma0 отдаёт кадр вот этому». По соседнему чипу
-     * (MT8183, патч в ядро «soc: mediatek: mmsys: Add support for MDP»)
-     * видно соглашение: MOUT_EN — маска, по биту на получателя; SEL_IN —
-     * просто номер источника. Но у MT8183 и смещения другие, и набор
-     * блоков богаче, так что переносить оттуда сами числа было бы
-     * гаданием.
-     *
-     * Зато ширину можно измерить. Пишем во все разряды единицы и читаем
-     * обратно: железо оставит только те, которые у него есть. Сколько
-     * бит вернулось у MOUT_EN — столько у блока получателей; какое
-     * наибольшее число вернулось у SEL_IN — столько у него источников.
-     * Это уже не догадка, а замер, и он режет перебор до считаных
-     * вариантов.
-     *
-     * Безопасно: блоки выключены и ничего не передают, а прежние
-     * значения кладём обратно и печатаем, что положили.
-     */
-    kprintf("MDP      : ШИРИНА МУЛЬТИПЛЕКСОРОВ:\n");
-    for (unsigned i = 0; i < MUX_N; i++) {
-        u32 keep = mmio_read32(MMSYS_BASE + mux[i].off);
-
-        mmio_write32(MMSYS_BASE + mux[i].off, 0xFFFFFFFF);
-        got = mmio_read32(MMSYS_BASE + mux[i].off);
-        mmio_write32(MMSYS_BASE + mux[i].off, keep);
-
-        kprintf("MDP      :   %s (%03x) РАЗРЯДЫ %08x, ВЕРНУЛ %08x\n",
-                mux[i].name, mux[i].off, got,
-                mmio_read32(MMSYS_BASE + mux[i].off));
-    }
-    usb_flush();
-
-    kprintf("MDP      : ПЕРВЫЕ ЧЕТЫРЕ СЛОВА КАЖДОГО БЛОКА:\n");
-    for (unsigned i = 0; i < CHAIN_N; i++)
-        peek(&chain[i]);
-    usb_flush();
-
-    /*
-     * Управляем ли мы блоками или только смотрим на них.
-     *
-     * Прошлый раз это проверялось сбросом: сбросить и посмотреть, не
-     * изменились ли регистры. Ответ вышел бессмысленный — они не
-     * изменились, но это ничего не доказывает: сброс здесь гасит
-     * состояние блока, а настройки в нём вполне могут пережить. Так что
-     * непонятно было, то ли сброс не сработал, то ли сработал и так и
-     * должно быть.
-     *
-     * Поэтому теперь проверка прямая: пишем в регистр настройки своё
-     * число и читаем обратно. Прочиталось — блок наш, и никаких
-     * толкований это не допускает.
-     *
-     * Число 00400020 выбрано читаемым в логе, а не круглым: сплошные
-     * нули или единицы можно спутать с тем, что регистр просто не
-     * отвечает.
-     */
-    kprintf("MDP      : ПРОБА ЗАПИСИ (ПИШУ 00400020, ЧИТАЮ ОБРАТНО):\n");
-    for (unsigned i = 0; i < CHAIN_N; i++) {
-        was[i] = mmio_read32(chain[i].base + chain[i].probe);
-        mmio_write32(chain[i].base + chain[i].probe, 0x00400020);
-        got = mmio_read32(chain[i].base + chain[i].probe);
-        kprintf("MDP      :   %s %s БЫЛО %08x СТАЛО %08x %s\n",
-                chain[i].name, chain[i].probe_name, was[i], got,
-                got == 0x00400020 ? "— ПИШЕТСЯ" : "— НЕ ПИШЕТСЯ");
-    }
-    usb_flush();
-
-    /*
-     * Сброс. Теперь он проверяет сам себя: в регистрах лежит наше
-     * число, и если сброс их обнулит — значит он дошёл до блока.
-     * Останется как было — значит настройки сброс переживают, что тоже
-     * знание, но уже без гаданий.
-     *
-     * Вендор пишет регистр целиком: сначала ~наши_биты, потом ~0. Второе
-     * слово выводит из сброса вообще всё, включая экранные блоки. Нам
-     * это не нужно: читаем, гасим только свои три бита, возвращаем
-     * прочитанное. Между двумя записями читаем регистр обратно — заодно
-     * видно, доходит ли до него запись вообще.
-     */
-    held = mmio_read32(MMSYS_BASE + MMSYS_SW0_RST_B);
-    rst = 0;
-    for (unsigned i = 0; i < CHAIN_N; i++)
-        rst |= 1U << chain[i].gate;
-
-    mmio_write32(MMSYS_BASE + MMSYS_SW0_RST_B, held & ~rst);
-    kprintf("MDP      : СБРОС: БЫЛО %08x, ПРОСИЛ %08x, В РЕГИСТРЕ %08x\n",
-            held, held & ~rst, mmio_read32(MMSYS_BASE + MMSYS_SW0_RST_B));
-    mmio_write32(MMSYS_BASE + MMSYS_SW0_RST_B, held);
-    usb_flush();
-
-    kprintf("MDP      : ПОСЛЕ СБРОСА (00400020 = ПЕРЕЖИЛО, 0 = СТЁРТО):\n");
-    for (unsigned i = 0; i < CHAIN_N; i++) {
-        got = mmio_read32(chain[i].base + chain[i].probe);
-        kprintf("MDP      :   %s %s %08x\n",
-                chain[i].name, chain[i].probe_name, got);
-        /* Возвращаем как было: разведка не оставляет следов */
-        mmio_write32(chain[i].base + chain[i].probe, was[i]);
-    }
-
-    kprintf("MDP      : РАЗВЕДКА ЗАКОНЧЕНА, ЭКРАН НЕ ТРОНУТ\n");
     usb_flush();
 }
 
@@ -449,3 +266,4 @@ void mdp_probe(void)
 void mdp_probe(void) { }
 
 #endif
+
