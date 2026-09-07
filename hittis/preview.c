@@ -998,12 +998,21 @@ static u32 utf8_next(const char **s)
     return b;
 }
 
-static void draw_text(int x, int y, int scale, vm_u32 color, const char *s)
+/*
+ * Написать строку и вернуть её ширину.
+ *
+ * Ширину возвращает именно тот, кто рисует: шрифт не равноширинный, и
+ * сложить её из числа букв нельзя. Без этого числа приложение не может
+ * выстроить набранное по одной букве, а значит и поля ввода в языке не
+ * бывает.
+ */
+static int draw_text(int x, int y, int scale, vm_u32 color, const char *s)
 {
     const struct face *f = face_for((u32)scale * 8);
+    int from = x;
 
     if (!f || !pix)
-        return;
+        return 0;
 
     while (*s) {
         u32 cp = utf8_next(&s);
@@ -1039,11 +1048,34 @@ static void draw_text(int x, int y, int scale, vm_u32 color, const char *s)
         }
         x += (int)adv;
     }
+    return x - from;
 }
 
 static void h_text(int x, int y, int scale, vm_u32 color, const char *s)
 {
     draw_text(x, y, scale, color, s);
+}
+
+/* Один знак по коду: складываем из него строку и рисуем обычным путём */
+static int h_textc(int x, int y, int scale, vm_u32 color, vm_i64 code)
+{
+    char buf[5];
+    int n = 0;
+
+    if (code <= 0)
+        return 0;
+    if (code < 0x80) {
+        buf[n++] = (char)code;
+    } else if (code < 0x800) {
+        buf[n++] = (char)(0xC0 | (code >> 6));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else {
+        buf[n++] = (char)(0xE0 | (code >> 12));
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    }
+    buf[n] = 0;
+    return draw_text(x, y, scale, color, buf);
 }
 
 static void h_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
@@ -1116,7 +1148,7 @@ static int h_width(void)  { return win_w; }
 static int h_height(void) { return win_h; }
 
 static const struct vm_host host = {
-    h_print, h_printn, h_window, h_rect, h_text, h_textn,
+    h_print, h_printn, h_window, h_rect, h_text, h_textn, h_textc,
     h_show, h_touch, h_sleep, h_time, h_width, h_height
 };
 

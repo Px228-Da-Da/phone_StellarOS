@@ -117,8 +117,20 @@ static vm_i64 h_time(void)
 static int h_width(void)                { return win_w; }
 static int h_height(void)               { return win_h; }
 
+/*
+ * Один знак. Экрана у прогона нет, поэтому просто говорим, что нарисован
+ * бы, и отвечаем правдоподобной шириной — приложение по ней выстраивает
+ * буквы, и ноль сбил бы его с толку.
+ */
+static int h_textc(int x, int y, int scale, vm_u32 color, vm_i64 code)
+{
+    printf("[знак %d,%d размер %d цвет %x: %lld]\n",
+           x, y, scale, color, code);
+    return scale * 4;
+}
+
 static const struct vm_host host = {
-    h_print, h_printn, h_window, h_rect, h_text, h_textn,
+    h_print, h_printn, h_window, h_rect, h_text, h_textn, h_textc,
     h_show, h_touch, h_sleep, h_time, h_width, h_height
 };
 

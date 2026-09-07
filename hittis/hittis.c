@@ -506,6 +506,7 @@ static const struct {
     { "width",  NAT_WIDTH,  0 },
     { "height", NAT_HEIGHT, 0 },
     { "exit",   NAT_EXIT,   1 },
+    { "textc",  NAT_TEXTC,  5 },
     { NULL, 0, 0 }
 };
 

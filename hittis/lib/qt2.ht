@@ -156,6 +156,106 @@ class Button:
         return 0
 
 
+# --- QLineEdit ------------------------------------------------------
+#
+# Поле ввода: одна строка текста, которую набирают снаружи.
+#
+# Набранное хранится списком кодов, а не строкой, и это не причуда.
+# Строки в языке существуют только как готовые постоянные: сложить новую
+# нельзя, узнать длину нельзя, добраться до буквы нельзя. Зато список
+# чисел есть, а нарисовать знак по коду умеет textc — он же сообщает его
+# ширину, потому что шрифт не равноширинный и выстроить буквы иначе не
+# получится.
+#
+# Клавиатуры библиотека не содержит намеренно: какие знаки нужны этому
+# приложению, знает только оно. Кнопка передаёт код в put(), и всё.
+
+class QLineEdit:
+    def create(self, x, y, w, h, size):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.size = size
+        self.codes = []
+        self.face = 0xFF1B2029
+        self.edge = 0xFF4C8DFF
+        self.ink = 0xFFFFFFFF
+        self.focus = 0
+        self.tag = 0
+        return 0
+
+    def paint(self, face, edge, ink):
+        self.face = face
+        self.edge = edge
+        self.ink = ink
+        return 0
+
+    def mark(self, tag):
+        self.tag = tag
+        return self
+
+    # Добавить знак по коду
+    def put(self, code):
+        add(self.codes, code)
+        return len(self.codes)
+
+    # Стереть последний. Списка короче язык не умеет, поэтому переписываем
+    # всё, кроме хвоста: поле короткое, и это дешевле, чем заводить в
+    # машине укорачивание ради одного случая.
+    def back(self):
+        old = self.codes
+        self.codes = []
+        i = 0
+        while i < len(old) - 1:
+            add(self.codes, old[i])
+            i = i + 1
+        return len(self.codes)
+
+    def clear(self):
+        self.codes = []
+        return 0
+
+    def length(self):
+        return len(self.codes)
+
+    def at(self, i):
+        return self.codes[i]
+
+    def draw(self):
+        rect(self.x, self.y, self.w, self.h, self.face)
+        if self.focus:
+            rect(self.x, self.y + self.h - 4, self.w, 4, self.edge)
+
+        pen = self.x + 16
+        top = self.y + self.h / 2 - self.size * 4
+        i = 0
+        while i < len(self.codes):
+            pen = pen + textc(pen, top, self.size, self.ink, self.codes[i])
+            i = i + 1
+
+        # Черта на месте следующего знака: без неё не видно, куда пишут.
+        if self.focus:
+            rect(pen + 4, top, 3, self.size * 8, self.ink)
+        return 0
+
+    def hit(self, px, py):
+        if px < self.x:
+            return 0
+        if px > self.x + self.w:
+            return 0
+        if py < self.y:
+            return 0
+        if py > self.y + self.h:
+            return 0
+        return 1
+
+    def press(self, down):
+        if down:
+            self.focus = 1
+        return 0
+
+
 # --- Screen ---------------------------------------------------------
 #
 # Экран держит список виджетов и знает про палец ровно одно: какому

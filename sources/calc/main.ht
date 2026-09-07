@@ -42,7 +42,7 @@ btnH = (H - panelH - pad * 3 - gap * 3) / 4
 
 top = pad + panelH + pad
 
-screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
+# screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
 display = screen.place(Number(pad, pad + panelH / 3, 8, theme.ink, 0))
 
 

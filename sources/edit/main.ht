@@ -1,0 +1,113 @@
+# QLineEdit from qt2: a text field with an on-screen keyboard.
+#
+# Клавиатура — часть приложения, а не библиотеки: какие знаки нужны,
+# знает только оно. Кнопка передаёт код в put(), поле само рисует
+# набранное и черту на месте следующего знака.
+#
+# Коды знаков числами: строк в языке не сложить, а сравнить их нельзя
+# вовсе. Зато код буквы — обычное число, и его хватает.
+
+use qt2
+
+app "EDIT"
+
+KEY_BACK  = 1
+KEY_CLEAR = 2
+KEY_SPACE = 3
+
+theme = Theme()
+screen = Screen(theme.background)
+
+W = width()
+H = height()
+
+pad = 40
+gap = 12
+
+screen.place(Label(pad, pad, 3, theme.dim, "QLINEEDIT"))
+
+fieldH = 140
+field = screen.place(QLineEdit(pad, pad + 60, W - pad * 2, fieldH, 5))
+field.focus = 1
+
+# Клавиатура: четыре ряда по шесть.
+cols = 6
+rows = 4
+top = pad + 60 + fieldH + pad
+keyW = (W - pad * 2 - gap * (cols - 1)) / cols
+keyH = (H - top - pad - gap * (rows - 1)) / rows
+
+
+def key(row, col, caption, tag, face):
+    x = pad + col * (keyW + gap)
+    y = top + row * (keyH + gap)
+    b = Button(x, y, keyW, keyH, caption)
+    b.center(1, 4)
+    b.mark(tag)
+    b.paint(face, theme.accent, theme.ink)
+    screen.place(b)
+    return b
+
+
+# Буквы: метка — код знака. Так приложению не нужно ни таблицы, ни
+# разбора подписи: что помечено, то и пишется.
+key(0, 0, "A", 65, theme.face)
+key(0, 1, "B", 66, theme.face)
+key(0, 2, "C", 67, theme.face)
+key(0, 3, "D", 68, theme.face)
+key(0, 4, "E", 69, theme.face)
+key(0, 5, "F", 70, theme.face)
+
+key(1, 0, "G", 71, theme.face)
+key(1, 1, "H", 72, theme.face)
+key(1, 2, "I", 73, theme.face)
+key(1, 3, "L", 76, theme.face)
+key(1, 4, "O", 79, theme.face)
+key(1, 5, "R", 82, theme.face)
+
+key(2, 0, "S", 83, theme.face)
+key(2, 1, "T", 84, theme.face)
+key(2, 2, "U", 85, theme.face)
+key(2, 3, "1", 49, theme.face)
+key(2, 4, "2", 50, theme.face)
+key(2, 5, "3", 51, theme.face)
+
+key(3, 0, "_", KEY_SPACE, theme.face)
+key(3, 1, "<", KEY_BACK, theme.accent)
+key(3, 2, "X", KEY_CLEAR, theme.danger)
+
+alive = 1
+
+screen.draw()
+print("EDIT: READY")
+
+while alive:
+    touchValue = touch()
+    if touchValue < 0:
+        alive = 0
+    else:
+        mln = 65536 * 65536
+        action = touchValue / (mln * 65536)
+        x = (touchValue / mln) % 65536
+        y = touchValue % mln
+
+        who = screen.handle(action, x, y)
+
+        if who:
+            tag = who.tag
+
+            if tag == KEY_BACK:
+                field.back()
+            if tag == KEY_CLEAR:
+                field.clear()
+            if tag == KEY_SPACE:
+                field.put(32)
+            if tag > 32:
+                field.put(tag)
+
+            print("EDIT: LENGTH NOW")
+            printn(field.length())
+
+        screen.draw()
+
+print("EDIT: DONE")

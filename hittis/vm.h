@@ -57,6 +57,15 @@ struct vm_host {
     void    (*rect)(int x, int y, int w, int h, vm_u32 color);
     void    (*text)(int x, int y, int scale, vm_u32 color, const char *s);
     void    (*textn)(int x, int y, int scale, vm_u32 color, vm_i64 v);
+    /*
+     * Один знак по коду, возвращает его ширину в точках.
+     *
+     * Нужен для ввода: строку язык сложить не умеет — у него нет ни
+     * длины строки, ни обращения к её буквам, — поэтому набранное
+     * хранится списком кодов и выводится по одному знаку. А шрифт у нас
+     * не равноширинный, значит и ширину должен сообщать тот, кто рисует.
+     */
+    int     (*textc)(int x, int y, int scale, vm_u32 color, vm_i64 code);
     void    (*show)(void);
     vm_i64  (*touch)(void);         /* см. договор о касании ниже        */
     void    (*sleep_ms)(vm_i64 ms);

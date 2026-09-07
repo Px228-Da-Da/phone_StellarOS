@@ -198,6 +198,7 @@ enum slt_native {
     NAT_WIDTH,          /* ширина окна                                */
     NAT_HEIGHT,         /* высота окна                                */
     NAT_EXIT,           /* завершиться                                */
+    NAT_TEXTC,          /* один знак по коду; вернёт его ширину       */
 
     NAT_COUNT
 };

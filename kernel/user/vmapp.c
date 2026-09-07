@@ -186,6 +186,36 @@ static void host_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
     text((u32)x, (u32)y, (u32)scale, color, 0, buf);
 }
 
+/*
+ * Один знак по коду; возвращает его ширину.
+ *
+ * Складываем из кода строку в три байта и отдаём её обычному выводу
+ * текста: он умеет utf-8, и заводить ради одной буквы второй путь до
+ * шрифта незачем. Ширину сообщает он же — ядро возвращает её из вызова.
+ */
+static int host_textc(int x, int y, int scale, vm_u32 color, vm_i64 code)
+{
+    char buf[5];
+    u32 n = 0;
+
+    if (!back || x < 0 || y < 0 || scale <= 0 || code <= 0)
+        return 0;
+
+    if (code < 0x80) {
+        buf[n++] = (char)code;
+    } else if (code < 0x800) {
+        buf[n++] = (char)(0xC0 | (code >> 6));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else {
+        buf[n++] = (char)(0xE0 | (code >> 12));
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    }
+    buf[n] = 0;
+
+    return (int)text((u32)x, (u32)y, (u32)scale, color, 0, buf);
+}
+
 static void host_show(void)
 {
     static u32 said;
@@ -233,6 +263,7 @@ static const struct vm_host host = {
     .rect     = host_rect,
     .text     = host_text,
     .textn    = host_textn,
+    .textc    = host_textc,
     .show     = host_show,
     .touch    = host_touch,
     .sleep_ms = host_sleep,
