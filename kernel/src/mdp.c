@@ -208,6 +208,83 @@ static void disp_routes(void)
 }
 
 /*
+ * Мьютекс: тот, кто раздаёт блокам начало кадра.
+ *
+ * Первая попытка снимка не удалась, и лог сказал почему. Настройка легла
+ * вся: EN 1, CFG 20, размер 09240438, вырезка 01000100, адрес, шаг — всё
+ * своё. Разводка переключилась и вернулась. Экран не заметил. А буфер
+ * остался нетронутым: 0 слов из 65536.
+ *
+ * Значит не хватало не настройки, а запуска. В этой подсистеме блоки не
+ * работают сами по себе: их заводит мьютекс, раздавая сигнал начала
+ * кадра. Мы его не трогали вовсе, поэтому WDMA0 стоял включённым, но
+ * ничем не запущенным, и рукопожатия с оверлеем не случилось. Отсюда же,
+ * кстати, и то, что экран не пострадал.
+ *
+ * Раскладка из ddp_reg_mutex.h и ddp_mutex.c вендора для MT6768:
+ *
+ *     мьютекс n:  EN = 0x20 + n*0x20,  SOF = 0x2C + n*0x20,
+ *                 MOD0 = 0x30 + n*0x20
+ *
+ * MOD0 — маска участников, по биту на блок (module_mutex_map[]). SOF —
+ * откуда брать начало кадра, в младших четырёх битах.
+ *
+ * Сначала читаем все восемь и смотрим, какой из них ведёт экран.
+ */
+#define MUTEX_BASE          0x14001000UL
+#define MUTEX_EN(n)         (0x20 + (n) * 0x20)
+#define MUTEX_SOF(n)        (0x2C + (n) * 0x20)
+#define MUTEX_MOD0(n)       (0x30 + (n) * 0x20)
+#define MUTEX_N             8
+
+/* module_mutex_map[] вендора: номер бита в MOD0 → блок */
+static const char *const mutex_who[32] = {
+    0, 0, 0, 0, 0, 0, 0, "ovl0",
+    "ovl0_2l", "rdma0", "wdma0", "color0",
+    "ccorr0", "aal0", "gamma0", "dither0",
+    "dsi0", "rsz0", 0, "pwm0",
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+#define MUTEX_BIT_OVL0      7
+#define MUTEX_BIT_WDMA0     10
+
+/* Найти мьютекс, который ведёт экран: включён и в нём оверлей */
+static int mutex_of_screen(void)
+{
+    for (int n = 0; n < MUTEX_N; n++) {
+        u32 en  = mmio_read32(MUTEX_BASE + MUTEX_EN(n));
+        u32 mod = mmio_read32(MUTEX_BASE + MUTEX_MOD0(n));
+
+        if ((en & 1) && (mod & (1U << MUTEX_BIT_OVL0)))
+            return n;
+    }
+    return -1;
+}
+
+static void mutex_dump(void)
+{
+    kprintf("MDP      : МЬЮТЕКСЫ (КТО РАЗДАЁТ НАЧАЛО КАДРА):\n");
+
+    for (int n = 0; n < MUTEX_N; n++) {
+        u32 en  = mmio_read32(MUTEX_BASE + MUTEX_EN(n));
+        u32 sof = mmio_read32(MUTEX_BASE + MUTEX_SOF(n));
+        u32 mod = mmio_read32(MUTEX_BASE + MUTEX_MOD0(n));
+
+        if (!en && !mod)
+            continue;               /* свободный, не занимаем место в логе */
+
+        kprintf("MDP      :   %d: EN %08x SOF %08x MOD0 %08x — ",
+                n, en, sof, mod);
+        for (int b = 0; b < 32; b++)
+            if ((mod & (1U << b)) && mutex_who[b])
+                kprintf("%s ", mutex_who[b]);
+        kprintf("\n");
+    }
+    usb_flush();
+}
+
+/*
  * Снимок экрана в память через DISP_WDMA0.
  *
  * Всё, что здесь пишется, взято из драйвера экрана вендора для MT6768
@@ -293,7 +370,8 @@ static void snap_report(const char *when)
 
 static void snapshot(void)
 {
-    u32 cg, mout_was, sel_was;
+    u32 cg, mout_was, sel_was, mod_was;
+    int mtx;
     u32 nonzero = 0;
     u32 i;
 
@@ -312,6 +390,7 @@ static void snapshot(void)
 
     kprintf("MDP      : СНИМОК ЭКРАНА %dx%d ИЗ (%d,%d) В 0x%08lx\n",
             SNAP_W, SNAP_H, SNAP_X, SNAP_Y, (u64)snap_buf);
+    mutex_dump();
 
     /* 1. Такты. Без них обращение к блоку повесит шину. */
     cg = gates();
@@ -360,10 +439,36 @@ static void snapshot(void)
     mmio_write32(MMSYS_BASE + DISP_OVL0_MOUT_EN, mout_was | OVL0_MOUT_TO_WDMA0);
     kprintf("MDP      : ПОДКЛЮЧИЛ: MOUT %08x -> %08x, SEL_IN %08x -> %d\n",
             mout_was, mout_was | OVL0_MOUT_TO_WDMA0, sel_was, WDMA0_SEL_IN_OVL0);
+
+    /*
+     * 6. Заводим WDMA0 тем же мьютексом, что ведёт экран.
+     *
+     * Прошлый раз этого шага не было, и в этом всё дело: блок стоял
+     * включённым, но никто не давал ему начала кадра. Мьютекс, ведущий
+     * экран, получает его от DSI0 каждый кадр — добавив в его список
+     * WDMA0, мы получаем снимок в том же ритме, что и показ.
+     *
+     * Пишем один бит поверх прочитанного, как это делает
+     * ddp_mutex_add_module() вендора, и возвращаем прежнее значение
+     * вместе с разводкой.
+     */
+    mtx = mutex_of_screen();
+    mod_was = 0;
+    if (mtx >= 0) {
+        mod_was = mmio_read32(MUTEX_BASE + MUTEX_MOD0(mtx));
+        mmio_write32(MUTEX_BASE + MUTEX_MOD0(mtx),
+                     mod_was | (1U << MUTEX_BIT_WDMA0));
+        kprintf("MDP      : МЬЮТЕКС %d: MOD0 %08x -> %08x\n",
+                mtx, mod_was, mod_was | (1U << MUTEX_BIT_WDMA0));
+    } else {
+        kprintf("MDP      : МЬЮТЕКСА С ОВЕРЛЕЕМ НЕТ — ЗАВОДИТЬ НЕЧЕМ\n");
+    }
     usb_flush();
 
     task_sleep_ms(50);
 
+    if (mtx >= 0)
+        mmio_write32(MUTEX_BASE + MUTEX_MOD0(mtx), mod_was);
     mmio_write32(MMSYS_BASE + DISP_OVL0_MOUT_EN, mout_was);
     mmio_write32(MMSYS_BASE + DISP_WDMA0_SEL_IN, sel_was);
     snap_report("ПОСЛЕ   ");
