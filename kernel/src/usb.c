@@ -303,6 +303,8 @@ void usb_probe(void)
 #define MUSB_INTRTXE        0x06
 #define MUSB_INTRRXE        0x08
 
+#define MUSB_FIFOSIZE       0x0F        /* при INDEX>0: размеры очередей */
+
 #define CONFIGDATA_DYNFIFO  0x04        /* очереди распределяются вручную */
 #define MUSB_TXCSR          0x12    /* тот же адрес, когда INDEX не ноль */
 #define MUSB_FIFO(ep)       (0x20 + 4 * (ep))
@@ -411,6 +413,7 @@ static struct {
     int ready;
     u8  cfg, power, txsz, rxsz;
     u16 txmaxp, txcsr, rxmaxp, rxcsr, txadd, rxadd, intrtxe, intrrxe;
+    u8  fifosize[5];        /* точки 0..4: старшая половина — приём */
 } dump;
 
 /*
@@ -541,6 +544,21 @@ static void bulk_setup(void)
     dump.rxsz   = mmio_read8(USB_BASE + MUSB_RXFIFOSZ);
     dump.txadd  = mmio_read16(USB_BASE + MUSB_TXFIFOADD);
     dump.rxadd  = mmio_read16(USB_BASE + MUSB_RXFIFOADD);
+    mmio_write8(USB_BASE + MUSB_INDEX, 0);
+
+    /*
+     * Размеры очередей по точкам.
+     *
+     * У MUSB это отдельный регистр на каждую точку: младшая половина
+     * байта — передача, старшая — приём, значение это степень двойки
+     * (размер равен 8 << n). Ноль в старшей половине означает, что
+     * приёмной очереди у точки нет вовсе — и тогда никакие настройки не
+     * помогут, принимать физически некуда. Ровно это и надо проверить.
+     */
+    for (u32 e = 0; e < 5; e++) {
+        mmio_write8(USB_BASE + MUSB_INDEX, (u8)e);
+        dump.fifosize[e] = mmio_read8(USB_BASE + MUSB_FIFOSIZE);
+    }
     mmio_write8(USB_BASE + MUSB_INDEX, 0);
 
     dump.ready = 1;
@@ -774,6 +792,10 @@ void usb_report(void)
             dump.txsz, dump.txadd, dump.rxsz, dump.rxadd);
     kprintf("USB      : РАЗРЕШЕНИЯ: INTRTXE %04x INTRRXE %04x\n",
             dump.intrtxe, dump.intrrxe);
+    kprintf("USB      : ОЧЕРЕДИ ПО ТОЧКАМ (RX/TX): "
+            "0 %02x, 1 %02x, 2 %02x, 3 %02x, 4 %02x\n",
+            dump.fifosize[0], dump.fifosize[1], dump.fifosize[2],
+            dump.fifosize[3], dump.fifosize[4]);
 }
 
 u32 usb_rx_packets(void) { return rx_packets; }
