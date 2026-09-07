@@ -38,9 +38,9 @@ manrope.stf: ../tools/fontgen.c ../fonts/Manrope-SemiBold.ttf
 	$(CC) $(CFLAGS) -o /tmp/hittis-fontgen ../tools/fontgen.c -lm
 	/tmp/hittis-fontgen ../fonts/Manrope-SemiBold.ttf 16,24,32,48 $@
 
-# Собрать и тут же прогнать все приложения из apps/
+# Собрать и тут же прогнать все исходники
 check: hittis hostrun
-	@for f in ../apps/*.ht; do \
+	@for f in ../исходники/*.ht; do \
 		echo "--- $$f"; \
 		./hittis $$f /tmp/`basename $$f .ht`.slt >/dev/null || exit 1; \
 		./hostrun /tmp/`basename $$f .ht`.slt || exit 1; \

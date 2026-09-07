@@ -2,9 +2,12 @@
 rem ============================================================
 rem  ht - prilozheniya Hittis.
 rem
-rem    ht ide   [apps\demo.ht]  sreda razrabotki v brauzere
-rem    ht send  apps\demo.ht    otpravit v telefon po provodu, bez proshivki
-rem    ht run   apps\demo.ht    okno na kompyutere, mysh kak palets
+rem    ht ide   [ishodniki\demo.ht]  sreda razrabotki v brauzere
+rem    ht send  ishodniki\demo.ht    otpravit v telefon po provodu
+rem    ht run   ishodniki\demo.ht    okno na kompyutere, mysh kak palets
+rem
+rem  Dve papki: v ishodniki/ tekst na Hittis, v apps/ gotovye .slt.
+rem  Sistema chitaet tolko apps/ i nichego ne kompiliruet.
 rem    ht build apps\demo.ht    sobrat .slt ryadom s ishodnikom
 rem    ht shot  apps\demo.ht    snyat pervyy kadr v kartinku
 rem    ht check                 progon vseh prilozheniy iz apps
@@ -21,14 +24,14 @@ rem     Posledovatelnyy port telefona viden tolko iz Windows, a
 rem     kompilyator zhivet v WSL - poetomu komanda iz dvuh polovin.
 if /i "%~1"=="send" (
     if "%APP%"=="" (
-        echo ukazhi prilozhenie: ht send apps\demo.ht
+        echo ukazhi prilozhenie: ht send ishodniki\demo.ht
         goto :eof
     )
     wsl -e sh -lc "/mnt/d/OS_ANDROID/tools/ht.sh build '%APP%'"
     if errorlevel 1 goto :eof
-    set "SLT=%~2"
-    set "SLT=!SLT:.ht=.slt!"
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\send.ps1" "%~dp0!SLT!"
+    rem Gotovoe lezhit v apps/, imya beryom ot ishodnika bez papki.
+    for %%F in ("%~2") do set "NAME=%%~nF"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\send.ps1" "%~dp0apps\!NAME!.slt"
     goto :eof
 )
 

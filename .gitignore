@@ -9,8 +9,7 @@ unpacked/
 hittis/hittis
 hittis/hostrun
 
-# Собранные приложения и шрифт просмотра — делаются из исходников
-apps/*.slt
+# Шрифт просмотра делается из исходников
 hittis/manrope.stf
 hittis/preview
 hittis/ide_html.h
