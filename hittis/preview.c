@@ -166,6 +166,7 @@ static int         port = 8080;
  */
 static int  listen_fd = -1;
 static int  ide_mode;                   /* показывать редактор, а не один кадр */
+static int  reopened;                   /* это перезапуск, а не первый пуск    */
 static char apps_dir[512] = "apps";     /* где искать .ht                      */
 static char build_dir[512] = ".";       /* где лежит компилятор                */
 static char compile_err[4096];          /* что сказал компилятор в прошлый раз */
@@ -210,10 +211,17 @@ static void restart_with(const char *path)
         listen_fd = -1;
     }
 
+    /*
+     * Помечаем себя «снова»: браузер открывать больше не нужно, вкладка
+     * уже открыта и никуда не делась. Порт мы держим тот же нарочно —
+     * ровно чтобы она пережила перезапуск. Открывать вторую значит
+     * каждым сохранением подсовывать человеку новое окно.
+     */
     if (ide_mode)
-        execl(self_path, self_path, path, port_arg, "--ide", (char *)NULL);
+        execl(self_path, self_path, path, port_arg, "--ide", "--снова",
+              (char *)NULL);
     else
-        execl(self_path, self_path, path, port_arg, (char *)NULL);
+        execl(self_path, self_path, path, port_arg, "--снова", (char *)NULL);
     die("перезапуститься не вышло");
 }
 
@@ -758,7 +766,7 @@ static void serve_begin(void)
 
     if (listen_fd < 0)
         http_start();
-    if (shown)
+    if (shown || reopened)
         return;
     shown = 1;
 
@@ -768,6 +776,9 @@ static void serve_begin(void)
      * всё равно некому показать. Не вышло — ничего страшного, адрес
      * напечатан выше.
      */
+    printf("открываю браузер\n");
+    fflush(stdout);
+
     snprintf(open_cmd, sizeof(open_cmd),
              "cmd.exe /c start http://localhost:%d >/dev/null 2>&1 || "
              "xdg-open http://localhost:%d >/dev/null 2>&1", port, port);
@@ -1095,9 +1106,12 @@ int main(int argc, char **argv)
     else if (argc >= 3 && atoi(argv[2]))
         port = atoi(argv[2]);
 
-    for (int i = 2; i < argc; i++)
+    for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--ide") == 0)
             ide_mode = 1;
+        if (strcmp(argv[i], "--снова") == 0)
+            reopened = 1;
+    }
 
     /* Рядом с собой лежит компилятор — им и собираем */
     snprintf(dir, sizeof(dir), "%s", argv[0]);
