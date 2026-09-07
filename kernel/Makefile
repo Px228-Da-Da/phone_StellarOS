@@ -137,6 +137,25 @@ $(BUILD)/font/manrope.stf: ../fonts/Manrope-SemiBold.ttf $(BUILD)/host/fontgen
 # font_data.S вшивает шрифт, поэтому пересобирается вместе с ним
 $(BUILD)/font_data.o: $(BUILD)/font/manrope.stf
 
+# --- Картинки ---
+#
+# PNG превращается в .sti при сборке: в телефон едет уже разобранная
+# картинка. Почему не разбираем на месте — написано в tools/imggen.c,
+# коротко: распаковщик стоит пары тысяч строк, а взять картинку, которой
+# не было при сборке, телефону сейчас всё равно неоткуда.
+#
+# zlib нужен только здесь, на сборочной машине. В систему он не попадает.
+$(BUILD)/host/imggen: ../tools/imggen.c
+	@mkdir -p $(BUILD)/host
+	$(HOSTCC) -O2 -o $@ $< -lz
+
+$(BUILD)/img/%.sti: ../sources/calc/%.png $(BUILD)/host/imggen
+	@mkdir -p $(BUILD)/img
+	$(BUILD)/host/imggen $< $@
+
+$(BUILD)/user/logo_img.h: $(BUILD)/img/logo.sti $(BUILD)/host/bin2c | $(BUILD)/user
+	$(BUILD)/host/bin2c $< logo_img > $@
+
 # --- Приложения на Hittis ---
 
 $(BUILD)/host/hittis: $(HITTIS)/hittis.c $(HITTIS)/slt.h
@@ -168,6 +187,11 @@ $(BUILD)/user/app_slt.h: ../apps/calc.slt $(BUILD)/host/bin2c | $(BUILD)/user
 # из ../hittis. Поэтому у него отдельное правило, а не общее по шаблону.
 $(BUILD)/user/vmapp.elf: user/vmapp.c $(HITTIS)/vm.c $(HITTIS)/vm.h                          $(HITTIS)/slt.h $(BUILD)/user/app_slt.h                          $(USER_DEPS) | $(BUILD)/user
 	$(CC) $(CFLAGS) -Iuser -I$(HITTIS) -I$(BUILD)/user -static 	      -T user/user.ld -o $@ user/vmapp.c $(HITTIS)/vm.c
+
+# Оболочка носит в себе картинку, поэтому у неё своё правило: ей нужен
+# и заголовок с картинкой, и путь до него.
+$(BUILD)/user/shell.elf: user/shell.c $(BUILD)/user/logo_img.h $(USER_DEPS) | $(BUILD)/user
+	$(CC) $(CFLAGS) -Iuser -I$(BUILD)/user -static -T user/user.ld -o $@ user/shell.c
 
 $(BUILD)/user/%.elf: user/%.c $(USER_DEPS) | $(BUILD)/user
 	$(CC) $(CFLAGS) -Iuser -static -T user/user.ld -o $@ $<
