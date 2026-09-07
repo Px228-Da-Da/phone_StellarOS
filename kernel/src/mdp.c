@@ -370,7 +370,7 @@ static void snap_report(const char *when)
 
 static void snapshot(void)
 {
-    u32 cg, mout_was, sel_was, mod_was;
+    u32 cg, mout_was, sel_was, mod_was, sta, waited;
     int mtx;
     u32 nonzero = 0;
     u32 i;
@@ -465,7 +465,27 @@ static void snapshot(void)
     }
     usb_flush();
 
-    task_sleep_ms(50);
+    /*
+     * 7. Ждём конца кадра, а не «сколько-нибудь миллисекунд».
+     *
+     * В прошлый раз окно резалось по таймеру, и получилось 44176 слов из
+     * 65536 при СОСТ 00000003 — а это не только «кадр готов» (бит 0), но
+     * и «недобор данных» (бит 1). То есть поток обрывался посреди кадра,
+     * ровно там, где мы отнимали разводку.
+     *
+     * Теперь ждём бит готовности и отключаемся сразу после него. Предел
+     * в двести миллисекунд — на случай, если он не придёт вовсе: тогда
+     * выходим по времени, как раньше, и говорим об этом.
+     */
+    waited = 0;
+    for (; waited < 200; waited++) {
+        if (mmio_read32(WDMA0_BASE + WDMA_INTSTA) & 1)
+            break;
+        task_sleep_ms(1);
+    }
+    sta = mmio_read32(WDMA0_BASE + WDMA_INTSTA);
+    kprintf("MDP      : ЖДАЛ %u МС, СОСТ %08x (БИТ 0 ГОТОВ, БИТ 1 НЕДОБОР)\n",
+            waited, sta);
 
     if (mtx >= 0)
         mmio_write32(MUTEX_BASE + MUTEX_MOD0(mtx), mod_was);
