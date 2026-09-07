@@ -224,12 +224,20 @@ static void disp_routes(void)
 void mdp_probe(void)
 {
     static int woken;
-    static int reports;
+    static int beats;
     u32 cg, want;
 
-    if (reports >= 3)
+    /*
+     * Первые полминуты молчим.
+     *
+     * Отчёт печатался в первых же пульсах и тонул в загрузочном выводе.
+     * Кольцо консоли теперь много больше, и одного этого хватило бы, но
+     * подождать заодно ничего не стоит: к шестидесятой секунде загрузка
+     * давно отговорила, и отчёт выходит в тишину.
+     */
+    beats++;
+    if (beats < 6 || beats > 8)
         return;
-    reports++;
 
     disp_routes();
 
