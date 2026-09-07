@@ -30,6 +30,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include "vm.h"
 #include "slt.h"
@@ -153,6 +154,23 @@ static const char *self_path;
 static const char *shot_path;
 static int         port = 8080;
 
+/*
+ * Среда разработки.
+ *
+ * Тот же самый двоичный файл, только страница другая: слева список
+ * приложений, посередине редактор, справа — телефон, который уже умел
+ * показывать просмотр. Держать это одной программой правильнее, чем
+ * двумя: машина, шрифт и отрисовка кадра нужны и там, и там, а
+ * копировать их значило бы завести вторую правду о том, как выглядит
+ * приложение.
+ */
+static int  listen_fd = -1;
+static int  ide_mode;                   /* показывать редактор, а не один кадр */
+static char apps_dir[512] = "apps";     /* где искать .ht                      */
+static char build_dir[512] = ".";       /* где лежит компилятор                */
+static char compile_err[4096];          /* что сказал компилятор в прошлый раз */
+static int  compile_ok;                 /* и чем это кончилось                 */
+
 static time_t mtime_of(const char *path)
 {
     struct stat st;
@@ -166,12 +184,42 @@ static void die(const char *why)
     exit(1);
 }
 
+/*
+ * Перезапуск с тем же исходником или с другим.
+ *
+ * Слушающий сокет закрываем ПЕРЕД сменой образа. Открытые файлы
+ * переживают exec, и прежний сокет остался бы висеть на порту: новый
+ * образ не смог бы его занять и уехал бы на соседний. Для просмотра это
+ * мелочь, а для среды разработки — беда: адрес в браузере обязан
+ * оставаться одним и тем же, иначе каждое сохранение уводило бы человека
+ * на новую вкладку.
+ *
+ * Порт и режим передаём себе же аргументами: без них перезапуск вернул
+ * бы простой просмотр вместо редактора.
+ */
+static void restart_with(const char *path)
+{
+    char port_arg[16];
+
+    snprintf(port_arg, sizeof(port_arg), "%d", port);
+    printf("\n=== перезапускаю на %s ===\n\n", path);
+    fflush(stdout);
+
+    if (listen_fd >= 0) {
+        close(listen_fd);
+        listen_fd = -1;
+    }
+
+    if (ide_mode)
+        execl(self_path, self_path, path, port_arg, "--ide", (char *)NULL);
+    else
+        execl(self_path, self_path, path, port_arg, (char *)NULL);
+    die("перезапуститься не вышло");
+}
+
 static void restart(void)
 {
-    printf("\n=== исходник изменился, перезапускаю ===\n\n");
-    fflush(stdout);
-    execl(self_path, self_path, src_path, (char *)NULL);
-    die("перезапуститься не вышло");
+    restart_with(src_path);
 }
 
 /* --- Картинка кадра: BMP -------------------------------------------- */
@@ -260,9 +308,16 @@ static const char page[] =
 "tick();"
 "</script>";
 
+/*
+ * Страница среды разработки лежит отдельным файлом ide.html и попадает
+ * сюда при сборке. Держать полторы сотни строк разметки строковым
+ * литералом в C можно, но читать и править их потом нельзя: пропадает
+ * подсветка, отступы и всякая возможность увидеть страницу целиком.
+ */
+#include "ide_html.h"
+
 /* --- Сервер --------------------------------------------------------- */
 
-static int  listen_fd = -1;
 static char app_name[64] = "приложение";
 
 static void http_start(void)
@@ -286,6 +341,7 @@ static void http_start(void)
             port += i;
             listen(listen_fd, 8);
             printf("смотреть здесь:  http://localhost:%d\n", port);
+            fflush(stdout);
             return;
         }
     }
@@ -325,23 +381,235 @@ static int arg_int(const char *req, const char *key)
     return p ? atoi(p + strlen(key)) : 0;
 }
 
+/* --- Файлы приложений ------------------------------------------------
+ *
+ * Среда разработки пишет в файлы, а значит обязана быть подозрительной.
+ * Имя приходит из браузера, и хотя браузер этот — свой, на localhost,
+ * принимать из него путь целиком нельзя: одна точка с косой чертой, и
+ * запись уходит куда угодно. Поэтому имя проверяется на вид, а папка
+ * приложений подставляется здесь и только здесь.
+ */
+static int name_ok(const char *f)
+{
+    if (!f || !*f)
+        return 0;
+    for (const char *p = f; *p; p++)
+        if (*p == '/' || *p == '\\' || *p == ':')
+            return 0;
+    if (strstr(f, ".."))
+        return 0;
+    return strstr(f, ".ht") != NULL;
+}
+
+static void app_path(char *out, size_t max, const char *name)
+{
+    snprintf(out, max, "%s/%s", apps_dir, name);
+}
+
+/* Список приложений одной строкой: имена через перевод строки */
+static void files_list(char *out, size_t max)
+{
+    DIR *d = opendir(apps_dir);
+    struct dirent *e;
+    size_t n = 0;
+
+    out[0] = 0;
+    if (!d)
+        return;
+    while ((e = readdir(d)) != NULL) {
+        size_t k;
+
+        if (!name_ok(e->d_name))
+            continue;
+        k = strlen(e->d_name);
+        if (n + k + 2 >= max)
+            break;
+        memcpy(out + n, e->d_name, k);
+        n += k;
+        out[n++] = '\n';
+    }
+    out[n] = 0;
+    closedir(d);
+}
+
+static char *text_read(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf;
+    long n;
+
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0)
+        n = 0;
+    buf = malloc((size_t)n + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    if (n && fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    buf[n] = 0;
+    fclose(f);
+    if (len)
+        *len = (size_t)n;
+    return buf;
+}
+
+static int text_write(const char *path, const char *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    int ok;
+
+    if (!f)
+        return -1;
+    ok = (len == 0) || fwrite(data, 1, len, f) == len;
+    fclose(f);
+    return ok ? 0 : -1;
+}
+
+/*
+ * Собрать и запомнить, что сказал компилятор.
+ *
+ * Вывод забираем целиком, вместе с руганью: в среде разработки он и есть
+ * главное, что человеку нужно увидеть после сохранения. Раньше он уходил
+ * в терминал, где его никто не читал.
+ */
+static int compile_to(const char *src, const char *out_slt)
+{
+    char cmd[2600];
+    FILE *p;
+    size_t n = 0;
+    int rc;
+
+    snprintf(cmd, sizeof(cmd), "%s/hittis '%s' '%s' 2>&1",
+             build_dir, src, out_slt);
+
+    compile_err[0] = 0;
+    p = popen(cmd, "r");
+    if (!p) {
+        snprintf(compile_err, sizeof(compile_err),
+                 "не запустить компилятор");
+        return -1;
+    }
+    while (n + 1 < sizeof(compile_err)) {
+        size_t k = fread(compile_err + n, 1, sizeof(compile_err) - 1 - n, p);
+
+        if (!k)
+            break;
+        n += k;
+    }
+    compile_err[n] = 0;
+    rc = pclose(p);
+    compile_ok = (rc == 0);
+    return compile_ok ? 0 : -1;
+}
+
+/*
+ * Прочитать запрос целиком, вместе с телом.
+ *
+ * Раньше хватало одного read: все запросы были короткими GET. Сохранение
+ * текста — это POST с телом в несколько килобайт, и оно приходит не
+ * обязательно одним куском. Читаем, пока не увидим конец заголовков, а
+ * потом добираем ровно столько, сколько обещано в Content-Length.
+ *
+ * Возвращает длину прочитанного или 0.
+ */
+static size_t read_request(int fd, char *buf, size_t max)
+{
+    size_t n = 0;
+    char *head_end = NULL;
+    long need = 0;
+
+    while (n + 1 < max) {
+        ssize_t k = read(fd, buf + n, max - 1 - n);
+
+        if (k <= 0)
+            break;
+        n += (size_t)k;
+        buf[n] = 0;
+
+        if (!head_end) {
+            head_end = strstr(buf, "\r\n\r\n");
+            if (head_end) {
+                const char *cl = strcasestr(buf, "Content-Length:");
+
+                need = cl ? strtol(cl + 15, NULL, 10) : 0;
+                head_end += 4;
+            }
+        }
+        if (head_end && (size_t)(head_end - buf) + (size_t)need <= n)
+            break;
+    }
+    buf[n] = 0;
+    return n;
+}
+
+/* Значение строкового параметра из запроса: ?f=имя */
+static void arg_str(const char *req, const char *key, char *out, size_t max)
+{
+    const char *p = strstr(req, key);
+    size_t n = 0;
+
+    out[0] = 0;
+    if (!p)
+        return;
+    p += strlen(key);
+    while (*p && *p != '&' && *p != ' ' && *p != '\r' && n + 1 < max) {
+        /* Имена приходят в процентной записи: кириллица иначе не проедет */
+        if (*p == '%' && p[1] && p[2]) {
+            char h[3] = { p[1], p[2], 0 };
+
+            out[n++] = (char)strtol(h, NULL, 16);
+            p += 3;
+        } else {
+            out[n++] = (*p == '+') ? ' ' : *p;
+            p++;
+        }
+    }
+    out[n] = 0;
+}
+
+/*
+ * Совпадает ли запрос с этим путём.
+ *
+ * Сравнение по префиксу тут не годится: «GET /f» совпадает и с «/files»,
+ * и список приложений уезжал в обработчик картинки. Поэтому после пути
+ * обязателен разделитель — пробел или вопрос.
+ */
+static int route(const char *req, const char *what)
+{
+    size_t n = strlen(what);
+
+    if (strncmp(req, what, n) != 0)
+        return 0;
+    return req[n] == ' ' || req[n] == '?';
+}
+
 static void serve_one(int fd)
 {
-    char req[1024];
-    ssize_t n = read(fd, req, sizeof(req) - 1);
+    static char req[262144];        /* сюда влезает исходник целиком */
+    size_t n = read_request(fd, req, sizeof(req));
+    char name[256];
+    char path[768];
 
-    if (n <= 0) {
+    if (!n) {
         close(fd);
         return;
     }
-    req[n] = 0;
 
-    if (strncmp(req, "GET /v", 6) == 0) {
+    if (route(req, "GET /v")) {
         char buf[128];
         int k = snprintf(buf, sizeof(buf), "%u %s", frame_no, app_name);
 
         reply(fd, "text/plain; charset=utf-8", buf, (size_t)k);
-    } else if (strncmp(req, "GET /f", 6) == 0) {
+    } else if (route(req, "GET /f")) {
         if (!pix) {
             reply(fd, "text/plain; charset=utf-8", "нет кадра", 17);
         } else {
@@ -351,7 +619,7 @@ static void serve_one(int fd)
             reply(fd, "image/bmp", bmp, len);
             free(bmp);
         }
-    } else if (strncmp(req, "GET /t", 6) == 0) {
+    } else if (route(req, "GET /t")) {
         int a = arg_int(req, "a=");
         int x = arg_int(req, "x=");
         int y = arg_int(req, "y=");
@@ -362,11 +630,149 @@ static void serve_one(int fd)
             y = 0;
         touch_put(((vm_i64)a << 48) | ((vm_i64)x << 32) | (vm_i64)y);
         reply(fd, "text/plain", "ok", 2);
+
+    /* --- дальше только для среды разработки --- */
+
+    } else if (route(req, "GET /files")) {
+        char list[4096];
+
+        files_list(list, sizeof(list));
+        reply(fd, "text/plain; charset=utf-8", list, strlen(list));
+
+    } else if (route(req, "GET /src")) {
+        arg_str(req, "f=", name, sizeof(name));
+        if (!name_ok(name)) {
+            reply(fd, "text/plain; charset=utf-8", "", 0);
+        } else {
+            size_t len = 0;
+            char *txt;
+
+            app_path(path, sizeof(path), name);
+            txt = text_read(path, &len);
+            reply(fd, "text/plain; charset=utf-8", txt ? txt : "", txt ? len : 0);
+            free(txt);
+        }
+
+    } else if (route(req, "GET /err")) {
+        /*
+         * Первой строкой — чем кончилась сборка, дальше сам вывод.
+         * Компилятор говорит и при удаче: имя приложения, размер окна,
+         * сколько вышло кода. Это полезно видеть, но красить его в цвет
+         * ошибки нельзя, а по одному тексту успех от неудачи не отличить.
+         */
+        char buf[4200];
+        int k = snprintf(buf, sizeof(buf), "%s\n%s",
+                         compile_ok ? "ок" : "ошибка", compile_err);
+
+        reply(fd, "text/plain; charset=utf-8", buf, (size_t)k);
+
+    } else if (route(req, "GET /now")) {
+        /* Какой файл сейчас открыт машиной: браузер должен знать, что
+         * показывает телефон справа, а не гадать по имени приложения. */
+        const char *p = src_path ? src_path : "";
+        const char *slash = strrchr(p, '/');
+
+        if (slash)
+            p = slash + 1;
+        reply(fd, "text/plain; charset=utf-8", p, strlen(p));
+
+    } else if (route(req, "POST /save")) {
+        const char *body = strstr(req, "\r\n\r\n");
+
+        arg_str(req, "f=", name, sizeof(name));
+        if (!name_ok(name) || !body) {
+            reply(fd, "text/plain; charset=utf-8", "имя не годится", 27);
+        } else {
+            body += 4;
+            app_path(path, sizeof(path), name);
+            if (text_write(path, body, strlen(body)) != 0) {
+                reply(fd, "text/plain; charset=utf-8", "не записать", 21);
+            } else {
+                /*
+                 * Сохранили — и всё. Перезапуск случится сам: за временем
+                 * правки следит тот же цикл, что и раньше. Второго
+                 * механизма заводить незачем, а один общий заодно значит,
+                 * что правка из любого редактора работает так же.
+                 */
+                reply(fd, "text/plain; charset=utf-8", "ок", 4);
+            }
+        }
+
+    } else if (route(req, "GET /open")) {
+        arg_str(req, "f=", name, sizeof(name));
+        if (!name_ok(name)) {
+            reply(fd, "text/plain; charset=utf-8", "имя не годится", 27);
+        } else {
+            static char keep[768];
+
+            app_path(keep, sizeof(keep), name);
+            reply(fd, "text/plain; charset=utf-8", "ок", 4);
+            close(fd);
+            restart_with(keep);         /* не возвращается */
+            return;
+        }
+
+    } else if (route(req, "GET /build")) {
+        char out[768];
+        char msg[5200];
+        int rc;
+
+        arg_str(req, "f=", name, sizeof(name));
+        if (!name_ok(name)) {
+            reply(fd, "text/plain; charset=utf-8", "имя не годится", 27);
+        } else {
+            char *dot;
+
+            app_path(path, sizeof(path), name);
+            snprintf(out, sizeof(out), "%s", path);
+            dot = strrchr(out, '.');
+            if (dot)
+                strcpy(dot, ".slt");
+
+            rc = compile_to(path, out);
+            snprintf(msg, sizeof(msg), "%s%s\n%s",
+                     rc == 0 ? "собрано: " : "не собралось: ",
+                     out, compile_err);
+            reply(fd, "text/plain; charset=utf-8", msg, strlen(msg));
+        }
+
+    } else if (ide_mode) {
+        reply(fd, "text/html; charset=utf-8", ide_html, sizeof(ide_html));
     } else {
         reply(fd, "text/html; charset=utf-8", page, sizeof(page) - 1);
     }
 
     close(fd);
+}
+
+/*
+ * Поднять сервер и показать страницу. Оба действия однократные: при
+ * ошибке в исходнике сюда заходят раньше сборки, а потом ещё раз —
+ * обычным путём, и второй заход не должен ни занимать порт заново, ни
+ * открывать вторую вкладку.
+ */
+static void serve_begin(void)
+{
+    char open_cmd[160];
+    static int shown;
+
+    if (listen_fd < 0)
+        http_start();
+    if (shown)
+        return;
+    shown = 1;
+
+    /*
+     * Открываем браузер сами. Из WSL это делается через cmd.exe:
+     * страница должна показаться в Windows, а не внутри Linux, где её
+     * всё равно некому показать. Не вышло — ничего страшного, адрес
+     * напечатан выше.
+     */
+    snprintf(open_cmd, sizeof(open_cmd),
+             "cmd.exe /c start http://localhost:%d >/dev/null 2>&1 || "
+             "xdg-open http://localhost:%d >/dev/null 2>&1", port, port);
+    if (system(open_cmd) != 0)
+        printf("(браузер не открылся сам — открой адрес выше руками)\n");
 }
 
 /*
@@ -668,7 +1074,6 @@ int main(int argc, char **argv)
 {
     const char *path;
     char slt[512];
-    char cmd[1200];
     char dir[512];
     void *image;
     vm_u32 len;
@@ -690,6 +1095,10 @@ int main(int argc, char **argv)
     else if (argc >= 3 && atoi(argv[2]))
         port = atoi(argv[2]);
 
+    for (int i = 2; i < argc; i++)
+        if (strcmp(argv[i], "--ide") == 0)
+            ide_mode = 1;
+
     /* Рядом с собой лежит компилятор — им и собираем */
     snprintf(dir, sizeof(dir), "%s", argv[0]);
     {
@@ -701,12 +1110,37 @@ int main(int argc, char **argv)
             snprintf(dir, sizeof(dir), ".");
     }
 
+    snprintf(build_dir, sizeof(build_dir), "%s", dir);
+    {
+        /* Папка приложений — та, где лежит открытый файл. Список слева
+         * должен показывать соседей по папке, а не гадать по имени. */
+        const char *slash = strrchr(path, '/');
+
+        if (slash && (size_t)(slash - path) < sizeof(apps_dir))
+            snprintf(apps_dir, sizeof(apps_dir), "%.*s",
+                     (int)(slash - path), path);
+        else
+            snprintf(apps_dir, sizeof(apps_dir), ".");
+    }
+
     if (strstr(path, ".ht")) {
         src_path = path;
         src_mtime = mtime_of(path);
         snprintf(slt, sizeof(slt), "/tmp/hittis-preview.slt");
-        snprintf(cmd, sizeof(cmd), "%s/hittis %s %s", dir, path, slt);
-        if (system(cmd) != 0) {
+
+        /*
+         * В среде разработки сервер поднимаем ДО сборки.
+         *
+         * Иначе при ошибке в исходнике страницы просто нет: человек
+         * сохранил файл с опечаткой и остался с мёртвой вкладкой вместо
+         * текста ошибки. А ошибка — это ровно то, ради чего среда и
+         * нужна; показать её важнее, чем показать кадр.
+         */
+        if (ide_mode && !shot_path)
+            serve_begin();
+
+        if (compile_to(path, slt) != 0) {
+            fprintf(stderr, "%s", compile_err);
             /*
              * Не выходим: приложение дописывают прямо во время просмотра,
              * и половина правок компилятору не нравится. Ждём следующей
@@ -714,11 +1148,18 @@ int main(int argc, char **argv)
              */
             fprintf(stderr, "\n=== жду исправления исходника ===\n");
             for (;;) {
-                struct timespec ts = { 0, 200 * 1000 * 1000 };
-
-                nanosleep(&ts, NULL);
                 if (mtime_of(path) != src_mtime)
                     restart();
+
+                /* Страница жива и показывает ошибку: править можно прямо
+                 * в ней, а сохранение перезапустит нас само. */
+                if (listen_fd >= 0) {
+                    http_pump(200);
+                } else {
+                    struct timespec ts = { 0, 200 * 1000 * 1000 };
+
+                    nanosleep(&ts, NULL);
+                }
             }
         }
     } else {
@@ -743,21 +1184,7 @@ int main(int argc, char **argv)
 
     printf("=== %s ===\n", app_name);
     if (!shot_path) {
-        char open_cmd[128];
-
-        http_start();
-
-        /*
-         * Открываем браузер сами. Из WSL это делается через cmd.exe:
-         * страница должна показаться в Windows, а не внутри Linux, где
-         * её всё равно некому показать. Не вышло — ничего страшного,
-         * адрес напечатан выше.
-         */
-        snprintf(open_cmd, sizeof(open_cmd),
-                 "cmd.exe /c start http://localhost:%d >/dev/null 2>&1 || "
-                 "xdg-open http://localhost:%d >/dev/null 2>&1", port, port);
-        if (system(open_cmd) != 0)
-            printf("(браузер не открылся сам — открой адрес выше руками)\n");
+        serve_begin();
 
         printf("мышь работает пальцем; правка %s перезапускает сама\n\n",
                src_path ? src_path : "исходника");

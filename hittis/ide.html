@@ -1,0 +1,377 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>Hittis</title>
+<!--
+  Среда разработки для Hittis.
+
+  Одна страница без единой библиотеки — по той же причине, по которой в
+  этой системе нет чужого кода вообще: всё, что здесь происходит, должно
+  быть видно целиком. Редактор — это textarea поверх подсвеченного pre;
+  приём старый и надёжный, а главное, он не отнимает у человека ни
+  выделения, ни отмены, ни ввода кириллицы, как это делают самодельные
+  редакторы на contenteditable.
+
+  Справа живёт тот же самый просмотр, что был раньше: телефон, в котором
+  приложение уже работает. Сохранил — увидел. Промежутка между «написал»
+  и «проверил» нет вовсе, и в этом весь смысл.
+-->
+<style>
+:root{
+  --bg:#0b0f1a; --panel:#111726; --edge:#1e2942; --edge2:#2a3a5e;
+  --ink:#c9d8f2; --dim:#6b7c9c; --accent:#7fd4ff; --accent2:#2e63c8;
+  --key:#ff9ec4; --nat:#7fd4ff; --num:#f6c177; --str:#9ee6a0; --rem:#54617d;
+  --bad:#ff8a9b;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 system-ui,sans-serif;display:flex;flex-direction:column}
+
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;
+  background:var(--panel);border-bottom:1px solid var(--edge)}
+header .brand{font-weight:600;color:var(--accent);letter-spacing:.5px}
+header .who{color:var(--dim)}
+header .who b{color:var(--ink);font-weight:600}
+header .grow{flex:1}
+button{background:#18233c;color:var(--ink);border:1px solid var(--edge2);
+  border-radius:7px;padding:7px 13px;font:inherit;cursor:pointer}
+button:hover{background:#20304f}
+button.main{background:var(--accent2);border-color:#3f79e0;color:#fff}
+button.main:hover{background:#3a72d8}
+#state{color:var(--dim);min-width:13em;text-align:right}
+#state.ok{color:var(--str)} #state.bad{color:var(--bad)}
+
+main{flex:1;display:flex;min-height:0}
+
+/* Список приложений */
+aside{width:210px;flex:none;background:var(--panel);
+  border-right:1px solid var(--edge);overflow:auto;padding:10px}
+aside h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;
+  color:var(--dim);margin:6px 8px 10px;font-weight:600}
+aside .f{padding:7px 10px;border-radius:7px;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+aside .f:hover{background:#18233c}
+aside .f.on{background:var(--accent2);color:#fff}
+aside .f.run::after{content:" ●";color:var(--str)}
+
+/* Редактор */
+section{flex:1;display:flex;flex-direction:column;min-width:0}
+.wrap{flex:1;position:relative;overflow:hidden;display:flex;min-height:0}
+#nums{flex:none;width:52px;padding:12px 8px 12px 0;text-align:right;
+  color:#3d4a68;background:#0d1322;border-right:1px solid var(--edge);
+  overflow:hidden;white-space:pre}
+.code{flex:1;position:relative;overflow:hidden}
+#hl,#ed{position:absolute;inset:0;margin:0;padding:12px 14px;border:0;
+  font:14px/1.5 "Cascadia Code","Consolas",ui-monospace,monospace;
+  white-space:pre;overflow:auto;tab-size:4}
+#hl{pointer-events:none;color:var(--ink)}
+#ed{background:transparent;color:transparent;caret-color:var(--accent);
+  resize:none;outline:none}
+#ed::selection{background:#2e63c855;color:transparent}
+.k{color:var(--key)} .n{color:var(--nat)} .d{color:var(--num)}
+.s{color:var(--str)} .c{color:var(--rem);font-style:italic}
+
+/* Ошибки и вывод */
+#out{flex:none;max-height:26vh;overflow:auto;padding:10px 14px;
+  background:#0d1322;border-top:1px solid var(--edge);
+  font:13px/1.6 ui-monospace,monospace;white-space:pre-wrap;color:var(--dim)}
+#out.bad{color:var(--bad)}
+#out b{color:var(--accent);cursor:pointer;text-decoration:underline}
+
+/* Телефон */
+.phone{flex:none;width:34vw;max-width:460px;background:var(--panel);
+  border-left:1px solid var(--edge);display:flex;flex-direction:column;
+  align-items:center;gap:10px;padding:14px;overflow:auto}
+.phone .cap{color:var(--dim);font-size:12px}
+img{image-rendering:pixelated;border-radius:14px;
+  box-shadow:0 10px 40px #0009;cursor:crosshair;user-select:none;
+  max-width:100%;max-height:calc(100vh - 140px);width:auto}
+</style>
+
+<header>
+  <span class=brand>Hittis</span>
+  <span class=who>файл: <b id=fname>—</b></span>
+  <button class=main id=save>Сохранить и запустить <span style="opacity:.7">Ctrl+S</span></button>
+  <button id=build>Собрать .slt</button>
+  <span class=grow></span>
+  <span id=state></span>
+</header>
+
+<main>
+  <aside>
+    <h2>Приложения</h2>
+    <div id=files></div>
+  </aside>
+
+  <section>
+    <div class=wrap>
+      <div id=nums>1</div>
+      <div class=code>
+        <pre id=hl></pre>
+        <textarea id=ed spellcheck=false autocomplete=off
+                  autocapitalize=off wrap=off></textarea>
+      </div>
+    </div>
+    <div id=out>Готово к работе.</div>
+  </section>
+
+  <div class=phone>
+    <div class=cap>мышь работает пальцем</div>
+    <img id=screen draggable=false>
+  </div>
+</main>
+
+<script>
+/* Слова языка — ровно те, что понимает компилятор. Список взят из
+   hittis.c, а не придуман: подсветка, которая врёт, хуже её отсутствия. */
+const KW  = ['app','def','if','else','while','return','and','or','not'];
+const NAT = ['print','printn','window','rect','text','textn','show',
+             'touch','sleep','time','width','height','exit'];
+
+const ed = document.getElementById('ed');
+const hl = document.getElementById('hl');
+const nums = document.getElementById('nums');
+const out = document.getElementById('out');
+const state = document.getElementById('state');
+const fname = document.getElementById('fname');
+const filesBox = document.getElementById('files');
+const screenImg = document.getElementById('screen');
+
+let openFile = '';      /* что открыто в редакторе */
+let runFile = '';       /* что крутится в телефоне  */
+let dirty = false;
+
+function say(text, kind){
+  state.textContent = text;
+  state.className = kind || '';
+}
+
+/* --- Подсветка ---------------------------------------------------- */
+
+function esc(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/*
+ * Разбираем строку слева направо, а не заменами по всему тексту.
+ * Замены цеплялись бы за слова внутри комментариев и строк — и красили
+ * бы их не тем цветом, то есть врали бы про то, что видит компилятор.
+ */
+function paint(src){
+  let o = '', i = 0;
+
+  while (i < src.length){
+    const c = src[i];
+
+    if (c === '#'){
+      let j = src.indexOf('\n', i);
+      if (j < 0) j = src.length;
+      o += '<span class=c>' + esc(src.slice(i, j)) + '</span>';
+      i = j;
+    } else if (c === '"'){
+      let j = i + 1;
+      while (j < src.length && src[j] !== '"' && src[j] !== '\n') j++;
+      if (j < src.length && src[j] === '"') j++;
+      o += '<span class=s>' + esc(src.slice(i, j)) + '</span>';
+      i = j;
+    } else if (/[0-9]/.test(c)){
+      let j = i;
+      while (j < src.length && /[0-9a-fA-FxX]/.test(src[j])) j++;
+      o += '<span class=d>' + esc(src.slice(i, j)) + '</span>';
+      i = j;
+    } else if (/[\p{L}_]/u.test(c)){
+      let j = i;
+      while (j < src.length && /[\p{L}\p{N}_]/u.test(src[j])) j++;
+      const w = src.slice(i, j);
+      if (KW.includes(w))       o += '<span class=k>' + esc(w) + '</span>';
+      else if (NAT.includes(w)) o += '<span class=n>' + esc(w) + '</span>';
+      else                      o += esc(w);
+      i = j;
+    } else {
+      o += esc(c);
+      i++;
+    }
+  }
+  return o;
+}
+
+function refresh(){
+  const src = ed.value;
+  hl.innerHTML = paint(src) + '\n';
+
+  const lines = src.split('\n').length;
+  let s = '';
+  for (let i = 1; i <= lines; i++) s += i + '\n';
+  nums.textContent = s;
+
+  hl.scrollTop = ed.scrollTop;
+  hl.scrollLeft = ed.scrollLeft;
+  nums.scrollTop = ed.scrollTop;
+}
+
+ed.addEventListener('input', () => {
+  dirty = true;
+  say('не сохранено');
+  refresh();
+});
+ed.addEventListener('scroll', () => {
+  hl.scrollTop = ed.scrollTop;
+  hl.scrollLeft = ed.scrollLeft;
+  nums.scrollTop = ed.scrollTop;
+});
+
+/* Табуляция принадлежит редактору, а не переходу по кнопкам: язык
+   отступами и живёт, а уйти из поля можно мышью. */
+ed.addEventListener('keydown', e => {
+  if (e.key === 'Tab'){
+    e.preventDefault();
+    const a = ed.selectionStart, b = ed.selectionEnd;
+    ed.value = ed.value.slice(0, a) + '    ' + ed.value.slice(b);
+    ed.selectionStart = ed.selectionEnd = a + 4;
+    dirty = true;
+    refresh();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 's'){
+    e.preventDefault();
+    save();
+  }
+});
+
+/* --- Разговор с сервером ------------------------------------------ */
+
+async function loadFiles(){
+  const t = await (await fetch('/files')).text();
+  const list = t.split('\n').filter(x => x);
+
+  filesBox.innerHTML = '';
+  for (const f of list){
+    const d = document.createElement('div');
+    d.className = 'f' + (f === openFile ? ' on' : '') +
+                        (f === runFile ? ' run' : '');
+    d.textContent = f;
+    d.onclick = () => openIt(f);
+    filesBox.appendChild(d);
+  }
+}
+
+async function openIt(f){
+  if (dirty && !confirm('В ' + openFile + ' есть несохранённое. Уйти?'))
+    return;
+  openFile = f;
+  fname.textContent = f;
+  ed.value = await (await fetch('/src?f=' + encodeURIComponent(f))).text();
+  dirty = false;
+  say('');
+  refresh();
+  loadFiles();
+
+  /* Открыли не то, что крутится — просим машину перейти на него */
+  if (f !== runFile){
+    fetch('/open?f=' + encodeURIComponent(f)).catch(() => {});
+    say('запускаю…');
+  }
+}
+
+async function save(){
+  if (!openFile) return;
+  say('сохраняю…');
+  await fetch('/save?f=' + encodeURIComponent(openFile), {
+    method: 'POST', body: ed.value
+  });
+  dirty = false;
+  say('сохранено', 'ok');
+  /* Перезапуск случится сам — сервер следит за временем правки */
+}
+
+document.getElementById('save').onclick = save;
+
+document.getElementById('build').onclick = async () => {
+  if (!openFile) return;
+  if (dirty) await save();
+  say('собираю…');
+  const t = await (await fetch('/build?f=' + encodeURIComponent(openFile))).text();
+  const bad = t.indexOf('не собралось') === 0;
+  showOut(t, bad);
+  say(bad ? 'не собралось' : 'собрано', bad ? 'bad' : 'ok');
+};
+
+/*
+ * Ошибку компилятора показываем как есть, но номер строки делаем
+ * ссылкой: в ошибке он и есть самое полезное, а искать строку глазами
+ * человек не должен.
+ */
+function showOut(text, bad){
+  out.className = bad ? 'bad' : '';
+  out.innerHTML = text.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/строка (\d+)/g, (m, n) => 'строка <b data-l="' + n + '">' + n + '</b>');
+  out.querySelectorAll('b[data-l]').forEach(b => {
+    b.onclick = () => jump(+b.dataset.l);
+  });
+}
+
+function jump(line){
+  const parts = ed.value.split('\n');
+  let pos = 0;
+  for (let i = 0; i < line - 1 && i < parts.length; i++)
+    pos += parts[i].length + 1;
+  ed.focus();
+  ed.selectionStart = pos;
+  ed.selectionEnd = pos + (parts[line - 1] ? parts[line - 1].length : 0);
+  const lh = 21;
+  ed.scrollTop = Math.max(0, (line - 6) * lh);
+  refresh();
+}
+
+/* --- Телефон справа ------------------------------------------------ */
+
+function pos(ev){
+  const r = screenImg.getBoundingClientRect();
+  const kx = screenImg.naturalWidth / r.width;
+  const ky = screenImg.naturalHeight / r.height;
+  return [Math.round((ev.clientX - r.left) * kx),
+          Math.round((ev.clientY - r.top) * ky)];
+}
+let down = false;
+function send(a, ev){
+  const p = pos(ev);
+  fetch('/t?a=' + a + '&x=' + p[0] + '&y=' + p[1]).catch(() => {});
+}
+screenImg.addEventListener('mousedown', ev => { down = true; send(0, ev); ev.preventDefault(); });
+screenImg.addEventListener('mousemove', ev => { if (down) send(1, ev); });
+window.addEventListener('mouseup', ev => { if (down){ down = false; send(2, ev); } });
+
+/* --- Опрос --------------------------------------------------------- */
+
+let seen = -1, lastErr = null;
+
+async function tick(){
+  try {
+    const v = await (await fetch('/v')).text();
+    const n = +v.split(' ')[0];
+    if (n !== seen){ seen = n; screenImg.src = '/f?' + n; }
+
+    const now = await (await fetch('/now')).text();
+    if (now && now !== runFile){
+      runFile = now;
+      if (!openFile) await openIt(now); else loadFiles();
+    }
+
+    const e = await (await fetch('/err')).text();
+    if (e !== lastErr){
+      lastErr = e;
+      const nl = e.indexOf('
+');
+      const bad = e.slice(0, nl < 0 ? e.length : nl).trim() === 'ошибка';
+      const body = nl < 0 ? '' : e.slice(nl + 1);
+
+      showOut(body.trim() || 'Собралось без замечаний.', bad);
+      if (bad) say('ошибка в исходнике', 'bad');
+      else if (!dirty) say('работает', 'ok');
+    }
+  } catch (err){ /* сервер перезапускается — просто ждём */ }
+  setTimeout(tick, 300);
+}
+
+loadFiles();
+tick();
+</script>

@@ -20,8 +20,16 @@ hostrun: hostrun.c vm.c vm.h slt.h
 # Сначала было окно X11 — и оказалось, что WSLg не доносит окна до
 # рабочего стола Windows. Браузер есть везде, работает без графики в WSL
 # и заодно по сети.
-preview: preview.c vm.c vm.h slt.h manrope.stf
+preview: preview.c vm.c vm.h slt.h manrope.stf ide_html.h
 	$(CC) $(CFLAGS) -o $@ preview.c vm.c
+
+# Страница среды разработки: держим её обычным html-файлом, а в программу
+# она попадает массивом байт. Иначе разметку пришлось бы писать строковым
+# литералом в C — без подсветки, без отступов и без возможности открыть
+# её в браузере отдельно.
+ide_html.h: ide.html bin2c.c
+	$(CC) $(CFLAGS) -o /tmp/hittis-bin2c bin2c.c
+	/tmp/hittis-bin2c ide.html ide_html > $@
 
 # Шрифт для просмотра — тот же самый, что уезжает в телефон.
 # Делается здесь, чтобы просмотр работал и без собранного ядра.
@@ -38,4 +46,4 @@ check: hittis hostrun
 	done
 
 clean:
-	rm -f hittis hostrun preview manrope.stf
+	rm -f hittis hostrun preview manrope.stf ide_html.h

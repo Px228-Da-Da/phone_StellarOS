@@ -2,6 +2,7 @@
 rem ============================================================
 rem  ht - prilozheniya Hittis.
 rem
+rem    ht ide   [apps\demo.ht]  sreda razrabotki v brauzere
 rem    ht run   apps\demo.ht    okno na kompyutere, mysh kak palets
 rem    ht build apps\demo.ht    sobrat .slt ryadom s ishodnikom
 rem    ht shot  apps\demo.ht    snyat pervyy kadr v kartinku
