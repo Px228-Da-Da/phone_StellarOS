@@ -1783,6 +1783,7 @@ static void heartbeat_task(void *arg)
                 input_scans, input_fails, input_events, input_dropped);
         kprintf("         ПРОВОД: ПАКЕТОВ %u, БАЙТ %u, ПОТЕРЯНО %u\n",
                 usb_rx_packets(), usb_rx_bytes(), usb_rx_lost());
+        usb_report();
 
         /*
          * Батарея — в каждом пульсе.
