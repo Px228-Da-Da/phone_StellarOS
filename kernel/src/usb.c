@@ -477,6 +477,21 @@ static void bulk_setup(void)
      * блок начинается с 0x10, отсюда 0x14, 0x16 и 0x18.
      */
     mmio_write16(USB_BASE + MUSB_RXMAXP, EP_BULK_MAXP);
+
+    /*
+     * Сброс очереди пишется ДВАЖДЫ, и это не описка.
+     *
+     * Очередь у точки двойная: пока одна половина разбирается, вторая
+     * принимает. Один сброс очищает только текущую, вторая остаётся
+     * помеченной занятой — и точка не принимает больше ничего, никогда.
+     * Наружу это выглядит так, как и выглядело: компьютер пишет в порт и
+     * получает «истекло время ожидания», а телефон молчит, потому что
+     * ему нечего сказать: до него ничего не дошло.
+     *
+     * Так же поступает драйвер Linux (drivers/usb/musb/musb_gadget.c,
+     * musb_gadget_enable): «set twice in case of double buffering».
+     */
+    mmio_write16(USB_BASE + MUSB_RXCSR, RXCSR_FLUSHFIFO | RXCSR_CLRDATATOG);
     mmio_write16(USB_BASE + MUSB_RXCSR, RXCSR_FLUSHFIFO | RXCSR_CLRDATATOG);
 
     mmio_write8(USB_BASE + MUSB_INDEX, 0);
@@ -613,6 +628,8 @@ static void ep0_setup(const u8 *p)
 static u8  rx_ring[USB_RX_RING];
 static u32 rx_head, rx_tail;
 static u32 rx_lost;
+static u32 rx_packets;
+static u32 rx_bytes;
 
 static void rx_put(u8 c)
 {
@@ -644,6 +661,13 @@ static void usb_rx_locked(void)
 
     if (csr & RXCSR_RXPKTRDY) {
         u16 n = mmio_read16(USB_BASE + MUSB_RXCOUNT);
+
+        /* Первые пакеты называем поимённо: без этого «дошло или нет»
+         * остаётся догадкой, а именно она стоила нам целой попытки. */
+        rx_packets++;
+        rx_bytes += n;
+        if (rx_packets <= 3)
+            kprintf("USB      : ПАКЕТ ОТ КОМПЬЮТЕРА, %u БАЙТ\n", n);
 
         for (u16 i = 0; i < n; i++) {
             u8 c;
@@ -677,6 +701,8 @@ int usb_recv(u8 *out)
 }
 
 u32 usb_rx_lost(void) { return rx_lost; }
+u32 usb_rx_packets(void) { return rx_packets; }
+u32 usb_rx_bytes(void) { return rx_bytes; }
 
 static void usb_poll_locked(void)
 {
@@ -934,4 +960,6 @@ void usb_flush(void) { }
 void usb_watch(u32 s) { (void)s; }
 int  usb_recv(u8 *out) { (void)out; return 0; }
 u32  usb_rx_lost(void) { return 0; }
+u32  usb_rx_packets(void) { return 0; }
+u32  usb_rx_bytes(void) { return 0; }
 #endif
