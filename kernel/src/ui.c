@@ -30,12 +30,20 @@
 /* --- Цвета оболочки ---------------------------------------------
  * Тёмная тема не из моды, а по делу: экран OLED-подобной яркости в
  * тёмной комнате, и белый фон на весь дисплей слепит. */
-#define UI_BG           0xFF0B0E14      /* почти чёрный с синевой   */
-#define UI_TILE         0xFF161B26      /* плитка                    */
-#define UI_TILE_EDGE    0xFF2A3345      /* её обводка                */
-#define UI_TEXT         0xFFE6EAF2      /* основной текст            */
-#define UI_DIM          0xFF7F8CA6      /* второстепенный            */
-#define UI_ACCENT       0xFF4FC3F7      /* акцент: заголовок, цифры  */
+/*
+ * Те же системные цвета тёмной темы iOS, что и в оболочке.
+ *
+ * Держать их согласованными обязательно: полосу состояния рисует ядро, а
+ * всё под ней — программа, и разойдись они хоть на оттенок, стык было бы
+ * видно поперёк экрана. Оттенка синевы в фоне здесь больше нет: там, где
+ * у Apple чёрный, он именно чёрный.
+ */
+#define UI_BG           0xFF000000      /* фон полос                 */
+#define UI_TILE         0xFF1C1C1E      /* вторичный фон             */
+#define UI_TILE_EDGE    0xFF38383A      /* разделитель               */
+#define UI_TEXT         0xFFFFFFFF      /* основной текст            */
+#define UI_DIM          0xFF8E8E93      /* второстепенный, systemGray */
+#define UI_ACCENT       0xFF0A84FF      /* акцент, systemBlue         */
 #define UI_TRANSPARENT  0x00000000      /* фон текста не закрашивать */
 
 /* --- Разметка ---------------------------------------------------- */
@@ -355,7 +363,7 @@ static void draw_battery(void)
     str_cat(line, sizeof(line), batt_trend);
 
     /* Цветом отмечаем только то, что требует внимания: мало заряда. */
-    color = st.charging ? UI_ACCENT : (st.percent <= 15 ? 0xFFFF6B6B : UI_TEXT);
+    color = st.charging ? UI_ACCENT : (st.percent <= 15 ? 0xFFFF453A : UI_TEXT);
     draw_line(MARGIN, BATT_Y + 12, 3, color, line, scr_w - 2 * MARGIN);
 
     /*
@@ -480,7 +488,7 @@ static void layers_init(void)
         for (u32 x = 0; x < tile_w; x++) {
             int edge = (x < 4 || y < 4 || x >= tile_w - 4 || y >= TILE_H - 4);
 
-            layer_hl[y * tile_w + x] = edge ? 0xFF4FC3F7 : 0xFF1E4A63;
+            layer_hl[y * tile_w + x] = edge ? 0xFF0A84FF : 0xFF1C1C1E;
         }
 
     /* Точка: круг. Считаем по расстоянию от центра, за границей — прозрачно.
@@ -493,7 +501,7 @@ static void layers_init(void)
             u32 lim = (DOT_SIZE / 2) * (DOT_SIZE / 2);
 
             layer_dot[y * DOT_SIZE + x] =
-                (r2 <= (int)lim) ? 0xFF4FC3F7 : 0x00000000;
+                (r2 <= (int)lim) ? 0xFF0A84FF : 0x00000000;
         }
 
     dsb();
