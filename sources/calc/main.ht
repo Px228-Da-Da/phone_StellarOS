@@ -1,12 +1,16 @@
 # Calculator built with qt2.
 #
-# Никаких rect и text: приложение говорит, из чего состоит, и спрашивает
-# экран, какую кнопку нажали. Всё рисование — в библиотеке.
+# Табло — QLineEdit, а не одно число: видно всё выражение целиком, как
+# его набирали. Раньше на нём жило только последнее введённое число, и
+# что именно считается, приходилось помнить в голове.
 #
-# Раскладка считается от размера экрана, а не написана числами. Прошлая
-# версия рисовала в прямоугольнике 720x900, а телефон отдаёт приложению
-# 1080x2196 — на экране получался маленький калькулятор в углу и чёрное
-# поле вокруг. Снаружи это выглядело как зависшая система.
+# Показывать число знаками пришлось своими руками: превращения числа в
+# строку в языке нет вовсе. Зато теперь на табло помещается «12+3», а
+# после «=» — ответ.
+#
+# Раскладка считается от размера экрана, а не написана числами. Первая
+# версия рисовала в прямоугольнике 720x900, а система отдаёт приложению
+# 1080x2196 — выходил маленький калькулятор в углу и чёрное поле вокруг.
 
 use qt2
 
@@ -25,6 +29,13 @@ OP_DIV = 4
 OP_EQ  = 5
 OP_CLR = 6
 
+# Коды знаков для табло
+CH_ZERO  = 48
+CH_MINUS = 45
+CH_PLUS  = 43
+CH_STAR  = 42
+CH_SLASH = 47
+
 
 theme = Theme()
 screen = Screen(theme.background)
@@ -35,56 +46,94 @@ H = height()
 pad = 40
 gap = 16
 
-# Табло сверху, под ним четыре ряда кнопок.
-panelH = H / 6
+panelH = 180
+top = pad + 50 + panelH + gap
+
 btnW = (W - pad * 2 - gap * 3) / 4
-btnH = (H - panelH - pad * 3 - gap * 3) / 4
+btnH = (H - top - pad - gap * 3) / 4
 
-top = pad + panelH + pad
+screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
 
-# screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
-display = screen.place(Number(pad, pad + panelH / 3, 8, theme.ink, 0))
+tape = screen.place(QLineEdit(pad, pad + 50, W - pad * 2, panelH, 6))
+tape.paint(theme.panel, theme.accent, theme.ink)
+tape.focus = 1
+
+
+# Показать число знаками.
+#
+# Своими руками, потому что превращения числа в строку в языке нет.
+# Цифры выходят с конца, поэтому сначала складываем их в список, а потом
+# читаем его назад — ровно то, ради чего списки в языке и заводились.
+def showNumber(field, value):
+    digits = []
+    negative = 0
+
+    field.clear()
+    if value == 0:
+        field.put(CH_ZERO)
+        return 0
+
+    if value < 0:
+        negative = 1
+        value = 0 - value
+
+    while value > 0:
+        add(digits, CH_ZERO + value % 10)
+        value = value / 10
+
+    if negative:
+        field.put(CH_MINUS)
+
+    i = len(digits) - 1
+    while i >= 0:
+        field.put(digits[i])
+        i = i - 1
+    return 0
 
 
 # Кнопка на своём месте в сетке.
 #
 # Ряд и столбец, а не пиксели: раскладка уже посчитана выше, и повторять
 # её в каждом вызове значило бы завести четыре шанса ошибиться.
-def key(row, col, caption, chars, tag, face):
+def key(row, col, caption, tag, face):
     x = pad + col * (btnW + gap)
     y = top + row * (btnH + gap)
     b = Button(x, y, btnW, btnH, caption)
-    b.center(chars, 5)
+    b.center(1, 5)
     b.mark(tag)
     b.paint(face, theme.accent, theme.ink)
     screen.place(b)
     return b
 
 
-key(0, 0, "7", 1, 107, theme.face)
-key(0, 1, "8", 1, 108, theme.face)
-key(0, 2, "9", 1, 109, theme.face)
-key(0, 3, "/", 1, OP_DIV, theme.accent)
+key(0, 0, "7", 107, theme.face)
+key(0, 1, "8", 108, theme.face)
+key(0, 2, "9", 109, theme.face)
+key(0, 3, "/", OP_DIV, theme.accent)
 
-key(1, 0, "4", 1, 104, theme.face)
-key(1, 1, "5", 1, 105, theme.face)
-key(1, 2, "6", 1, 106, theme.face)
-key(1, 3, "*", 1, OP_MUL, theme.accent)
+key(1, 0, "4", 104, theme.face)
+key(1, 1, "5", 105, theme.face)
+key(1, 2, "6", 106, theme.face)
+key(1, 3, "*", OP_MUL, theme.accent)
 
-key(2, 0, "1", 1, 101, theme.face)
-key(2, 1, "2", 1, 102, theme.face)
-key(2, 2, "3", 1, 103, theme.face)
-key(2, 3, "-", 1, OP_SUB, theme.accent)
+key(2, 0, "1", 101, theme.face)
+key(2, 1, "2", 102, theme.face)
+key(2, 2, "3", 103, theme.face)
+key(2, 3, "-", OP_SUB, theme.accent)
 
-key(3, 0, "0", 1, 100, theme.face)
-key(3, 1, "C", 1, OP_CLR, theme.danger)
-key(3, 2, "=", 1, OP_EQ, theme.accent)
-key(3, 3, "+", 1, OP_ADD, theme.accent)
+key(3, 0, "0", 100, theme.face)
+key(3, 1, "C", OP_CLR, theme.danger)
+key(3, 2, "=", OP_EQ, theme.accent)
+key(3, 3, "+", OP_ADD, theme.accent)
 
 
 first = 0
 input = 0
 operation = 0
+
+# Табло показывает ответ: следующая цифра начинает новое выражение, а не
+# дописывается к нему. Без этого «2+2=4», а потом «5» дало бы «45».
+fresh = 1
 alive = 1
 
 
@@ -102,6 +151,17 @@ def calculate(a, b, action):
     return b
 
 
+def signOf(action):
+    if action == OP_ADD:
+        return CH_PLUS
+    if action == OP_SUB:
+        return CH_MINUS
+    if action == OP_MUL:
+        return CH_STAR
+    return CH_SLASH
+
+
+showNumber(tape, 0)
 screen.draw()
 print("CALC: READY")
 
@@ -120,30 +180,40 @@ while alive:
         if who:
             tag = who.tag
 
-            # Цифра: дописываем справа.
+            # Цифра: дописываем и на табло, и в число.
             if tag >= 100:
+                if fresh:
+                    tape.clear()
+                    fresh = 0
+                    input = 0
                 input = input * 10 + (tag - 100)
+                tape.put(CH_ZERO + tag - 100)
 
             if tag == OP_CLR:
                 first = 0
                 input = 0
                 operation = 0
+                fresh = 1
+                showNumber(tape, 0)
 
-            # Действие: запоминаем, что накопили, и ждём второе число.
+            # Действие: считаем накопленное и ждём второе число.
             if tag > 0:
                 if tag < OP_EQ:
-                    first = calculate(first, input, operation)
                     if operation == 0:
                         first = input
+                    else:
+                        first = calculate(first, input, operation)
                     input = 0
                     operation = tag
+                    fresh = 0
+                    tape.put(signOf(tag))
 
             if tag == OP_EQ:
                 input = calculate(first, input, operation)
                 first = 0
                 operation = 0
-
-            display.value = input
+                fresh = 1
+                showNumber(tape, input)
 
         screen.draw()
 
