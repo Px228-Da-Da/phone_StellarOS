@@ -295,6 +295,15 @@ void usb_probe(void)
 #define MUSB_RXMAXP         0x14
 #define MUSB_RXCSR          0x16
 #define MUSB_RXCOUNT        0x18
+#define MUSB_CONFIGDATA     0x0F        /* читается при INDEX = 0      */
+#define MUSB_TXFIFOSZ       0x62
+#define MUSB_RXFIFOSZ       0x63
+#define MUSB_TXFIFOADD      0x64
+#define MUSB_RXFIFOADD      0x66
+#define MUSB_INTRTXE        0x06
+#define MUSB_INTRRXE        0x08
+
+#define CONFIGDATA_DYNFIFO  0x04        /* очереди распределяются вручную */
 #define MUSB_TXCSR          0x12    /* тот же адрес, когда INDEX не ноль */
 #define MUSB_FIFO(ep)       (0x20 + 4 * (ep))
 
@@ -495,6 +504,49 @@ static void bulk_setup(void)
     mmio_write16(USB_BASE + MUSB_RXCSR, RXCSR_FLUSHFIFO | RXCSR_CLRDATATOG);
 
     mmio_write8(USB_BASE + MUSB_INDEX, 0);
+
+    /*
+     * Что на самом деле получилось.
+     *
+     * До точки не доходило ни байта, и обе догадки — про двойной сброс и
+     * про размер пакета — проверить иначе нечем. Спрашиваем сам
+     * контроллер: как он устроен (распределяются очереди вручную или
+     * нет), какого размера очередь у нашей точки и что в её регистрах
+     * после настройки. Печатается один раз, при перечислении.
+     */
+    {
+        u8  cfg;
+        u16 rxmaxp, rxcsr, txmaxp, txcsr;
+        u8  txsz, rxsz;
+        u16 txadd, rxadd;
+
+        mmio_write8(USB_BASE + MUSB_INDEX, 0);
+        cfg = mmio_read8(USB_BASE + MUSB_CONFIGDATA);
+
+        mmio_write8(USB_BASE + MUSB_INDEX, EP_BULK);
+        txmaxp = mmio_read16(USB_BASE + MUSB_TXMAXP);
+        txcsr  = mmio_read16(USB_BASE + MUSB_TXCSR);
+        rxmaxp = mmio_read16(USB_BASE + MUSB_RXMAXP);
+        rxcsr  = mmio_read16(USB_BASE + MUSB_RXCSR);
+        txsz   = mmio_read8(USB_BASE + MUSB_TXFIFOSZ);
+        rxsz   = mmio_read8(USB_BASE + MUSB_RXFIFOSZ);
+        txadd  = mmio_read16(USB_BASE + MUSB_TXFIFOADD);
+        rxadd  = mmio_read16(USB_BASE + MUSB_RXFIFOADD);
+        mmio_write8(USB_BASE + MUSB_INDEX, 0);
+
+        kprintf("USB      : CONFIGDATA %02x%s, СКОРОСТЬ %s\n",
+                cfg, (cfg & CONFIGDATA_DYNFIFO) ? " (ОЧЕРЕДИ ВРУЧНУЮ)" : "",
+                (mmio_read8(USB_BASE + MUSB_POWER) & 0x10) ? "ВЫСОКАЯ"
+                                                          : "ПОЛНАЯ");
+        kprintf("USB      : ТОЧКА %u: TXMAXP %04x TXCSR %04x, "
+                "RXMAXP %04x RXCSR %04x\n",
+                EP_BULK, txmaxp, txcsr, rxmaxp, rxcsr);
+        kprintf("USB      : ОЧЕРЕДИ: TXSZ %02x ADD %04x, RXSZ %02x ADD %04x\n",
+                txsz, txadd, rxsz, rxadd);
+        kprintf("USB      : РАЗРЕШЕНИЯ: INTRTXE %04x INTRRXE %04x\n",
+                mmio_read16(USB_BASE + MUSB_INTRTXE),
+                mmio_read16(USB_BASE + MUSB_INTRRXE));
+    }
 }
 
 static const u8 val_one = 1;
