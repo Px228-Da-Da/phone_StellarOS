@@ -66,6 +66,7 @@ struct vm_host {
      * не равноширинный, значит и ширину должен сообщать тот, кто рисует.
      */
     int     (*textc)(int x, int y, int scale, vm_u32 color, vm_i64 code);
+    int     (*textw)(int scale, const char *s);
     void    (*show)(void);
     vm_i64  (*touch)(void);         /* см. договор о касании ниже        */
     void    (*sleep_ms)(vm_i64 ms);

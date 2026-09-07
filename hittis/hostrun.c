@@ -137,9 +137,36 @@ static int h_textc(int x, int y, int scale, vm_u32 color, vm_i64 code)
     return scale * 4;
 }
 
+/*
+ * Ширина строки без рисования.
+ *
+ * Шрифта здесь нет вовсе — hostrun это проверка поведения, а не вида, —
+ * поэтому отвечаем той же правдоподобной шириной, что и textc: размер на
+ * четыре за знак. Ноль сбил бы разметку приложения с толку и превратил
+ * бы проверку в ложную тревогу.
+ *
+ * Настоящую ширину показывает предпросмотр: там шрифт тот же, что на
+ * телефоне, и меряет он по начертаниям.
+ */
+static int h_textw(int scale, const char *s)
+{
+    int n = 0;
+
+    if (!s || scale <= 0)
+        return 0;
+    while (*s) {
+        if ((*s++ & 0xC0) != 0x80)      /* считаем знаки, а не байты */
+            n++;
+    }
+    return n * scale * 4;
+}
+
 static const struct vm_host host = {
-    h_print, h_printn, h_window, h_rect, h_text, h_textn, h_textc,
-    h_show, h_touch, h_sleep, h_time, h_width, h_height
+    .print = h_print,   .printn = h_printn, .window = h_window,
+    .rect  = h_rect,    .text   = h_text,   .textn  = h_textn,
+    .textc = h_textc,   .textw  = h_textw,  .show   = h_show,
+    .touch = h_touch,   .sleep_ms = h_sleep, .time_ms = h_time,
+    .width = h_width,   .height = h_height,
 };
 
 int main(int argc, char **argv)

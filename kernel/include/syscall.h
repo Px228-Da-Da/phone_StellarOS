@@ -44,7 +44,9 @@
 #define SYS_APP         18      /* x0,x1 — куда и сколько; вернёт длину    */
                                 /* принятого по проводу приложения, 0 —    */
                                 /* значит работает вшитое в систему        */
-#define SYS_COUNT       19
+#define SYS_TEXTW       19      /* x0 - razmer; x1,x2 - stroka i dlina;   */
+                                /* vernyot shirinu, nichego ne risuya     */
+#define SYS_COUNT       20
 
 /*
  * Событие касания в том виде, в каком его получает EL0.

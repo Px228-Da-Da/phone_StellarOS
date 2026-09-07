@@ -265,6 +265,12 @@ static void do_native(struct vm *m, vm_u32 id)
         push(m, h->textc((int)x, (int)y, (int)sc, (vm_u32)c, v));
         break;
     }
+    case NAT_TEXTW: {
+        vm_i64 s = pop(m), sc = pop(m);
+
+        push(m, h->textw((int)sc, str_at(m, s)));
+        break;
+    }
     case NAT_SHOW:
         h->show();
         push(m, 0);

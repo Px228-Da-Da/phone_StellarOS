@@ -187,6 +187,19 @@ static void host_textn(int x, int y, int scale, vm_u32 color, vm_i64 v)
 }
 
 /*
+ * Ширина строки, ничего не рисуя.
+ *
+ * Окно здесь не проверяется намеренно: измерять можно и до того, как оно
+ * открыто. Разметку часто считают заранее, а окно заводят потом.
+ */
+static int host_textw(int scale, const char *s)
+{
+    if (scale <= 0 || !s)
+        return 0;
+    return (int)textw((u32)scale, s);
+}
+
+/*
  * Один знак по коду; возвращает его ширину.
  *
  * Складываем из кода строку в три байта и отдаём её обычному выводу
@@ -264,6 +277,7 @@ static const struct vm_host host = {
     .text     = host_text,
     .textn    = host_textn,
     .textc    = host_textc,
+    .textw    = host_textw,
     .show     = host_show,
     .touch    = host_touch,
     .sleep_ms = host_sleep,

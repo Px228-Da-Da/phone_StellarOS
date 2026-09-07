@@ -1006,6 +1006,38 @@ static u32 utf8_next(const char **s)
  * выстроить набранное по одной букве, а значит и поля ввода в языке не
  * бывает.
  */
+/*
+ * Ширина строки, ничего не рисуя.
+ *
+ * Считаем ровно так же, как её набирает draw_text: по начертанию каждого
+ * знака и его шагу, а для незнакомого — половина кегля. Иначе предпросмотр
+ * разложил бы подписи не так, как телефон, и толку от него было бы мало.
+ */
+static int measure_text(int scale, const char *s)
+{
+    const struct face *f = face_for((u32)scale * 8);
+    int w = 0;
+
+    if (!f || !s)
+        return 0;
+
+    while (*s) {
+        u32 cp = utf8_next(&s);
+        const u8 *g;
+
+        if (glyph_find(f, cp, &g) != 0)
+            w += (int)f->px / 2;
+        else
+            w += g[5];
+    }
+    return w;
+}
+
+static int h_textw(int scale, const char *s)
+{
+    return measure_text(scale, s);
+}
+
 static int draw_text(int x, int y, int scale, vm_u32 color, const char *s)
 {
     const struct face *f = face_for((u32)scale * 8);
@@ -1148,8 +1180,11 @@ static int h_width(void)  { return win_w; }
 static int h_height(void) { return win_h; }
 
 static const struct vm_host host = {
-    h_print, h_printn, h_window, h_rect, h_text, h_textn, h_textc,
-    h_show, h_touch, h_sleep, h_time, h_width, h_height
+    .print = h_print,   .printn = h_printn, .window = h_window,
+    .rect  = h_rect,    .text   = h_text,   .textn  = h_textn,
+    .textc = h_textc,   .textw  = h_textw,  .show   = h_show,
+    .touch = h_touch,   .sleep_ms = h_sleep, .time_ms = h_time,
+    .width = h_width,   .height = h_height,
 };
 
 /* --- Запуск --------------------------------------------------------- */

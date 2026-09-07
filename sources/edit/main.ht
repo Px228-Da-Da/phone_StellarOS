@@ -42,7 +42,7 @@ def key(row, col, caption, tag, face):
     x = pad + col * (keyW + gap)
     y = top + row * (keyH + gap)
     b = Button(x, y, keyW, keyH, caption)
-    b.center(1, 4)
+    b.center(4)
     b.mark(tag)
     b.paint(face, theme.accent, theme.ink)
     screen.place(b)

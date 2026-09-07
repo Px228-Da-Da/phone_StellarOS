@@ -200,6 +200,8 @@ enum slt_native {
     NAT_EXIT,           /* завершиться                                */
     NAT_TEXTC,          /* один знак по коду; вернёт его ширину       */
 
+    NAT_TEXTW,          /* shirina stroki v tochkah, bez risovaniya   */
+
     NAT_COUNT
 };
 

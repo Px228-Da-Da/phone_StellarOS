@@ -52,7 +52,7 @@ top = pad + 50 + panelH + gap
 btnW = (W - pad * 2 - gap * 3) / 4
 btnH = (H - top - pad - gap * 3) / 4
 
-screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
+# screen.place(Label(pad, pad, 3, theme.dim, "CALC"))
 
 tape = screen.place(QLineEdit(pad, pad + 50, W - pad * 2, panelH, 6))
 tape.paint(theme.panel, theme.accent, theme.ink)
@@ -99,7 +99,7 @@ def key(row, col, caption, tag, face):
     x = pad + col * (btnW + gap)
     y = top + row * (btnH + gap)
     b = Button(x, y, btnW, btnH, caption)
-    b.center(1, 5)
+    b.center(5)
     b.mark(tag)
     b.paint(face, theme.accent, theme.ink)
     screen.place(b)

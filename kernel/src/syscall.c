@@ -265,6 +265,37 @@ static s64 sys_text(u64 x, u64 y, u64 scale, u64 color, u64 uva, u64 len)
                        (u32)color, (u32)(color >> 32), buf);
 }
 
+/*
+ * Ширина строки, без рисования.
+ *
+ * Нужна затем, что шрифт у нас пропорциональный: «C» и «Ж» разной
+ * ширины, и посчитать её умножением на количество букв нельзя. До сих
+ * пор ширину сообщал только сам вывод текста — то есть узнать её можно
+ * было, лишь написав. Для разметки это бесполезно: чтобы поставить
+ * подпись по центру, ширину надо знать заранее.
+ *
+ * Окно здесь не требуется вовсе: измерение — чистая работа со шрифтом,
+ * и мерить можно до того, как окно открыто.
+ */
+static s64 sys_textw(u64 scale, u64 uva, u64 len)
+{
+    char buf[128];
+
+    if (len > sizeof(buf) - 1)
+        len = sizeof(buf) - 1;
+    if (!len)
+        return 0;
+
+    if (copy_from_user(buf, uva, len) != 0) {
+        kprintf("EL0      : %s ПРОСИТ ИЗМЕРИТЬ ЧУЖОЕ, АДРЕС %p\n",
+                task_name(), (void *)(uintptr_t)uva);
+        return -1;
+    }
+
+    buf[len] = 0;
+    return (s64)fb_text_width((u32)scale, buf);
+}
+
 static void syscall(struct trapframe *f)
 {
     u64 nr = f->x[8];
@@ -308,6 +339,10 @@ static void syscall(struct trapframe *f)
     case SYS_TEXT:
         f->x[0] = (u64)(s64)sys_text(f->x[0], f->x[1], f->x[2], f->x[3],
                                      f->x[4], f->x[5]);
+        return;
+
+    case SYS_TEXTW:
+        f->x[0] = (u64)(s64)sys_textw(f->x[0], f->x[1], f->x[2]);
         return;
 
     case SYS_FLIP:
