@@ -1,4 +1,4 @@
-# Отправить приложение Hittis в телефон по проводу.
+﻿# Отправить приложение Hittis в телефон по проводу.
 #
 #   powershell -File tools\send.ps1 apps\demo.slt
 #
@@ -81,7 +81,27 @@ try {
         Start-Sleep -Milliseconds 12
     }
     Write-Host "отправлено $($bytes.Length) байт в $port, сумма $sum" -ForegroundColor Green
-    Write-Host "телефон должен показать приложение сам"
+
+    # Слушаем ответ.
+    #
+    # Порт всё равно открыт и занят нами, а телефон отчитывается о приёме
+    # в ту же консоль. Показать его ответ прямо здесь дешевле, чем
+    # заставлять человека закрывать отправку и открывать консоль ради
+    # одной строки.
+    $sp.ReadTimeout = 300
+    $end = (Get-Date).AddSeconds(3)
+    $buf = ""
+    while ((Get-Date) -lt $end) {
+        try { $buf += $sp.ReadExisting() } catch { }
+        if ($buf -match "ПРИНЯТО|СУММА НЕ|ОБРЫВ|ОТКАЗ") { break }
+        Start-Sleep -Milliseconds 100
+    }
+    foreach ($l in ($buf -split "`n")) {
+        if ($l -match "ПРИЁМ|HITTIS") { Write-Host "  $($l.Trim())" -ForegroundColor Cyan }
+    }
+    if ($buf -notmatch "ПРИНЯТО") {
+        Write-Host "телефон не отозвался — на нём ещё старая система?" -ForegroundColor Yellow
+    }
 } finally {
     $sp.Close()
 }
