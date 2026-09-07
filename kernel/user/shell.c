@@ -145,6 +145,7 @@ static u64 frame_told;
 
 static int armed;                   /* какая кнопка взведена, -1 — ни одна */
 static int off_rc;                  /* чем кончилась попытка выключить    */
+static int off_screen;              /* показан экран выключения           */
 static u64 armed_at;
 static u64 last_seen_ms;     /* когда последний раз слышали палец */
 static u64 app_task;         /* запущенное приложение; 0 — не запускали */
@@ -350,6 +351,28 @@ static void copy_str(char *dst, const char *src, u32 max)
         i++;
     }
     dst[i] = 0;
+}
+
+static void show(void);     /* показ кадра определён ниже */
+
+/*
+ * Экран выключения во всё окно.
+ *
+ * Нужен по простой причине: консоль у нас идёт по тому же кабелю,
+ * который заряжает телефон, а с кабелем телефон не выключается. Значит
+ * проверить выключение по логу нельзя в принципе — как только условие
+ * для него выполнено, лога больше нет. Отчитаться может только сам
+ * экран, и вот он.
+ */
+static void power_screen(const char *what, const char *why)
+{
+    u32 y = (sh > 200) ? sh / 2 - 80 : 0;
+
+    urect(back, sw, 0, 0, sw, sh, COL_BG);
+    text(MARGIN + 20, y, 4, COL_WHITE, COL_BG, what);
+    if (why)
+        text(MARGIN + 20, y + 100, 3, COL_TEXT, COL_BG, why);
+    show();
 }
 
 static void draw_button(void)
@@ -746,6 +769,12 @@ static void on_down(const struct touch *t)
 {
     touches++;
 
+    /* Экран выключения держится до касания и им же снимается */
+    if (off_screen) {
+        off_screen = 0;
+        return;
+    }
+
     /*
      * Касание во время полёта только останавливает список и ничего не
      * выбирает. Так ведёт себя всякий приличный список: палец ловит
@@ -771,9 +800,21 @@ static void on_down(const struct touch *t)
                  * человек может что-то сделать, с общим «не вышло» —
                  * ничего.
                  */
+                power_screen("ВЫКЛЮЧАЮСЬ", 0);
+
                 off_rc = (int)power_off();
                 if (!off_rc)
                     off_rc = -1;
+
+                /*
+                 * Сюда попадаем только если телефон остался жив.
+                 * Показываем причину и держим её на экране, пока не
+                 * коснутся: она важнее, чем скорее вернуть стол.
+                 */
+                power_screen("НЕ ВЫКЛЮЧИЛОСЬ",
+                             off_rc == -3 ? "ОТКЛЮЧИ КАБЕЛЬ И НАЖМИ СНОВА"
+                                          : "ЖЕЛЕЗО НЕ ОТКЛИКНУЛОСЬ");
+                off_screen = 1;
                 armed = -1;
                 return;
             }
@@ -985,6 +1026,9 @@ void _start(void)
             shown_sec = uptime_ms() / 1000;
             redraw = 1;
         }
+
+        if (off_screen)
+            redraw = 0;         /* причина отказа висит, пока не коснутся */
 
         if (redraw) {
             u64 t0 = uptime_ms();
