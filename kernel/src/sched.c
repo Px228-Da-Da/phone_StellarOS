@@ -13,6 +13,7 @@
  * которым возвращаться ещё некуда.
  */
 #include "sched.h"
+#include "trace.h"
 #include "smp.h"
 #include "spinlock.h"
 #include "kmalloc.h"
@@ -646,7 +647,9 @@ void task_exit_code(u64 code)
 void sched_idle_loop(void)
 {
     for (;;) {
+        trace(TR_SCHED, 0);
         schedule();     /* появилась работа — уйдём на неё */
+        trace(TR_IDLE, 0);
         wfi();          /* нет — спим до ближайшего прерывания */
     }
 }

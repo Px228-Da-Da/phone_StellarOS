@@ -250,6 +250,66 @@ static u32 *rle_pack(u32 *n_out)
     return out;
 }
 
+/*
+ * Уменьшить до ширины tw, усредняя.
+ *
+ * Усреднение, а не выбрасывание лишних точек: обои это плавные переходы,
+ * и выбрасывание оставило бы на них ступеньки. Считаем каждую точку
+ * нового изображения как среднее прямоугольника старых, что на неё
+ * приходится, — то есть настоящее уменьшение, а не прореживание.
+ *
+ * Складываем в u32 и делим в конце: суммировать до деления обязательно,
+ * иначе на каждой точке терялись бы младшие разряды, и на градиенте это
+ * видно полосами.
+ */
+static void downscale(u32 tw)
+{
+    u32 th, *dst;
+
+    if (!tw || tw >= img_w)
+        return;
+    th = (u32)(((unsigned long long)img_h * tw + img_w / 2) / img_w);
+    if (!th)
+        th = 1;
+
+    dst = malloc((size_t)tw * th * 4);
+    if (!dst)
+        die("не хватило памяти на уменьшение");
+
+    for (u32 y = 0; y < th; y++) {
+        u32 y0 = (u32)((unsigned long long)y * img_h / th);
+        u32 y1 = (u32)((unsigned long long)(y + 1) * img_h / th);
+
+        if (y1 <= y0)
+            y1 = y0 + 1;
+        for (u32 x = 0; x < tw; x++) {
+            u32 x0 = (u32)((unsigned long long)x * img_w / tw);
+            u32 x1 = (u32)((unsigned long long)(x + 1) * img_w / tw);
+            u32 a = 0, r = 0, g = 0, b = 0, n = 0;
+
+            if (x1 <= x0)
+                x1 = x0 + 1;
+            for (u32 sy = y0; sy < y1; sy++)
+                for (u32 sx = x0; sx < x1; sx++) {
+                    u32 p = pix[(size_t)sy * img_w + sx];
+
+                    a += p >> 24 & 0xFF;
+                    r += p >> 16 & 0xFF;
+                    g += p >>  8 & 0xFF;
+                    b += p       & 0xFF;
+                    n++;
+                }
+            dst[(size_t)y * tw + x] = ((a / n) << 24) | ((r / n) << 16)
+                                    | ((g / n) << 8) | (b / n);
+        }
+    }
+
+    free(pix);
+    pix = dst;
+    img_w = tw;
+    img_h = th;
+}
+
 int main(int argc, char **argv)
 {
     FILE *out;
@@ -257,12 +317,16 @@ int main(int argc, char **argv)
     u32 raw_bytes, rle_bytes;
     u32 *rle;
 
-    if (argc != 3) {
-        fprintf(stderr, "как пользоваться: imggen картинка.png картинка.sti\n");
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr,
+                "как пользоваться: imggen картинка.png картинка.sti [ширина]\n"
+                "  ширина — уменьшить до неё, сохранив пропорции\n");
         return 1;
     }
 
     png_load(argv[1]);
+    if (argc == 4)
+        downscale((u32)strtoul(argv[3], NULL, 10));
     raw_bytes = img_w * img_h * 4;
     rle = rle_pack(&rle_bytes);
 

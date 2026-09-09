@@ -13,6 +13,8 @@
  * придётся только эту задачу.
  */
 #include "input.h"
+#include "fb.h"
+#include "uart.h"
 #include "window.h"
 #include "uiarea.h"
 #include "sched.h"
@@ -248,13 +250,27 @@ static void event_push(u8 id, u8 action, u16 x, u16 y)
         inside = (y >= ay && y < ay + ah);
 
         if (action == TOUCH_DOWN && !inside) {
-            if (y >= ay + ah)
-                window_home();
-            grabbed[id] = 0;
-            return;
+            /*
+             * Касание с нижней полоски: сперва пробуем спрятать
+             * приложение. Если прятать нечего — на экране одна
+             * оболочка, — касание НЕ проглатываем, а отдаём ей.
+             *
+             * Иначе жест разблокировки, который начинается ровно на
+             * этой полоске, до неё бы не доходил: система съедала бы
+             * его целиком, ничего взамен не делая.
+             */
+            if (y >= ay + ah && window_home())
+                {
+                    grabbed[id] = 0;
+                    return;
+                }
+            if (y < ay) {       /* верхняя полоса остаётся системной */
+                grabbed[id] = 0;
+                return;
+            }
         }
 
-        if (!inside && !grabbed[id])
+        if (!inside && !grabbed[id] && action != TOUCH_DOWN)
             return;             /* началось в полосе — там и закончится */
     }
 
@@ -435,10 +451,109 @@ static void input_scan(void)
     }
 }
 
+
+#if defined(BOARD_QEMU)
+/*
+ * Касания с клавиатуры — только для эмулятора.
+ *
+ * Тачскрина там нет: касания читаются с микросхемы Novatek по SPI, а её
+ * не существует. Каждый опрос честно проваливается, и в эмуляторе
+ * невозможно нажать ничего — то есть проверить оформление можно только
+ * прошив телефон, а это долгая пляска с кабелем.
+ *
+ * Клавиатура зато есть: qemu отдаёт её в UART, а читать его мы умеем.
+ * Поэтому здесь нажатия превращаются в те же события, что приходят от
+ * пальца, и дальше система разницы не видит вовсе.
+ *
+ * Это НЕ эмуляция тачскрина и не попытка ею быть: настоящий палец даёт
+ * поток промежуточных положений, а клавиша — одно. Жесты поэтому заданы
+ * целиком, отдельными клавишами, а не собираются из шагов курсора.
+ *
+ *   w a s d  — двигать точку нажатия на 60 точек
+ *   пробел   — нажать и отпустить там, где точка
+ *   u        — провести вверх (снять блокировку)
+ *   p        — провести вниз от верха (панель управления)
+ *   c        — сказать, где сейчас точка
+ */
+#define KBD_STEP    60
+
+static u16 kx, ky;
+static int kbd_ready;
+
+static void kbd_tap(u16 x, u16 y)
+{
+    event_push(1, TOUCH_DOWN, x, y);
+    event_push(1, TOUCH_UP, x, y);
+}
+
+/* Провести пальцем по прямой: начало, конец, столько-то шагов */
+static void kbd_swipe(u16 x0, u16 y0, u16 x1, u16 y1)
+{
+    const int steps = 12;
+
+    event_push(1, TOUCH_DOWN, x0, y0);
+    for (int i = 1; i <= steps; i++)
+        event_push(1, TOUCH_MOVE,
+                   (u16)(x0 + (int)(x1 - x0) * i / steps),
+                   (u16)(y0 + (int)(y1 - y0) * i / steps));
+    event_push(1, TOUCH_UP, x1, y1);
+}
+
+static void kbd_poll(void)
+{
+    u32 w, h, stride;
+    u64 base;
+    int c;
+
+    fb_info(&base, &w, &h, &stride);
+    if (!w || !h)
+        return;
+    if (!kbd_ready) {
+        kx = (u16)(w / 2);
+        ky = (u16)(h / 2);
+        kbd_ready = 1;
+        kprintf("ВВОД     : КЛАВИАТУРА ВМЕСТО ПАЛЬЦА: wasd двигать, "
+                "пробел нажать, u вверх, p панель\n");
+    }
+
+    while ((c = uart_getc_nb()) >= 0) {
+        switch (c) {
+        case 'w': ky = (u16)(ky > KBD_STEP ? ky - KBD_STEP : 0); break;
+        case 's': ky = (u16)((u32)(ky + KBD_STEP) < h
+                             ? (u32)(ky + KBD_STEP) : h - 1); break;
+        case 'a': kx = (u16)(kx > KBD_STEP ? kx - KBD_STEP : 0); break;
+        case 'd': kx = (u16)((u32)(kx + KBD_STEP) < w
+                             ? (u32)(kx + KBD_STEP) : w - 1); break;
+        case ' ':
+        case '\r':
+        case '\n':
+            kprintf("ВВОД     : НАЖАТИЕ %u,%u\n", kx, ky);
+            kbd_tap(kx, ky);
+            continue;
+        case 'u':
+            kbd_swipe((u16)(w / 2), (u16)(h - h / 8), (u16)(w / 2),
+                      (u16)(h / 8));
+            kprintf("ВВОД     : ПРОВЁЛ ВВЕРХ\n");
+            continue;
+        case 'p':
+            kbd_swipe((u16)(w / 2), 10, (u16)(w / 2), (u16)(h / 3));
+            kprintf("ВВОД     : ПРОВЁЛ ВНИЗ ОТ ВЕРХА\n");
+            continue;
+        default:
+            continue;
+        }
+        kprintf("ВВОД     : ТОЧКА %u,%u\n", kx, ky);
+    }
+}
+#endif
+
 static void input_task(void *arg)
 {
     (void)arg;
     for (;;) {
+#if defined(BOARD_QEMU)
+        kbd_poll();     /* в эмуляторе палец заменяет клавиатура */
+#endif
         input_scan();
         /* Спим до следующего опроса, а не уступаем в пустом цикле:
          * уступка вернула бы задачу в очередь готовых, и с высоким

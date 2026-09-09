@@ -132,7 +132,7 @@ $(BUILD)/host/fontgen: ../tools/fontgen.c
 
 $(BUILD)/font/manrope.stf: ../fonts/Manrope-SemiBold.ttf $(BUILD)/host/fontgen
 	@mkdir -p $(BUILD)/font
-	$(BUILD)/host/fontgen $< 16,24,32,48,102:StellarOS,150:StellarOS,190:0123456789: $@
+	$(BUILD)/host/fontgen $< 16,24,32,48,56,102:StellarOS,150:StellarOS,190:0123456789:,250:0123456789: $@
 
 # font_data.S вшивает шрифт, поэтому пересобирается вместе с ним
 $(BUILD)/font_data.o: $(BUILD)/font/manrope.stf
@@ -155,6 +155,28 @@ $(BUILD)/img/%.sti: ../sources/calc/%.png $(BUILD)/host/imggen
 
 $(BUILD)/user/logo_img.h: $(BUILD)/img/logo.sti $(BUILD)/host/bin2c | $(BUILD)/user
 	$(BUILD)/host/bin2c $< logo_img > $@
+
+# --- Обои ---
+#
+# Уменьшаем ВДВОЕ против экрана и увеличиваем обратно уже в телефоне.
+# Почему так, а не как есть, написано в src/wall.c: полный кадр это
+# десять мегабайт, а обои — плавные переходы, в которых возить каждую
+# точку незачем.
+#
+# 540 не подобрано на глаз: экран 1080 точек шириной, и половина от него
+# даёт увеличение ровно вдвое, без дробного масштаба.
+WALLPAPER := ../inons/wallpaper/ios-18-stock-wallpaper--18486.png
+
+$(BUILD)/img/wall.sti: $(WALLPAPER) $(BUILD)/host/imggen
+	@mkdir -p $(BUILD)/img
+	$(BUILD)/host/imggen $< $@ 540
+
+$(BUILD)/wall_img.h: $(BUILD)/img/wall.sti $(BUILD)/host/bin2c | $(BUILD)
+	$(BUILD)/host/bin2c $< wall_img > $@
+
+# Обои вшиты в wall.c, поэтому ему нужен и заголовок, и путь до него
+$(BUILD)/wall.o: src/wall.c $(BUILD)/wall_img.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(BUILD) -c $< -o $@
 
 # --- Приложения на Hittis ---
 

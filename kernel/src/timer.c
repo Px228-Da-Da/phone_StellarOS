@@ -11,12 +11,14 @@
  * по прерыванию. На телефоне это разница между горячим корпусом и холодным.
  */
 #include "timer.h"
+#include "trace.h"
 #include "gic.h"
 #include "io.h"
 #include "print.h"
 #include "smp.h"
 #include "sched.h"
 #include "usb.h"
+#include "wdt.h"
 #include "fdt.h"
 
 #define CNTV_CTL_ENABLE     (1UL << 0)
@@ -54,6 +56,7 @@ static void timer_irq(u32 intid)
 
     timer_write_tval(interval);
     this_cpu()->ticks++;
+    trace(TR_TICK, 0);
 
     /*
      * Отдаём накопленный вывод в USB-консоль. Место выбрано намеренно:
@@ -62,7 +65,12 @@ static void timer_irq(u32 intid)
      * и не заходит в паузы. Внутри стоит проверка на загрузочное ядро,
      * так что остальные семь сюда не заглядывают.
      */
+    trace(TR_USB, 0);
     usb_poll();
+
+    /* Гладим сторожа: одна запись, без замков и ожиданий — больше
+     * обработчик прерывания себе позволять и не должен. */
+    wdt_kick();
 
     /* Отсюда и берётся вытеснение: планировщик считает кванты
      * по тем же тикам и решает, не пора ли сменить задачу. */

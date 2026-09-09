@@ -14,7 +14,7 @@
 #include "font.h"
 #include "print.h"
 
-#define FACE_MAX 8
+#define FACE_MAX 10
 
 static struct font_face faces[FACE_MAX];
 static u32 nfaces;
@@ -33,7 +33,10 @@ int font_init(const u8 *blob, u32 len)
 
     if (!blob || len < 8 + FACE_MAX * 32)
         return -1;
-    if (blob[0] != 'S' || blob[1] != 'T' || blob[2] != 'F' || blob[3] != '1') {
+    /* Подпись STF2: у первого формата метрики были однобайтовыми и
+     * переполнялись на крупных начертаниях. Прочитать старый файл новым
+     * разборщиком нельзя, и молчать об этом нельзя тем более. */
+    if (blob[0] != 'S' || blob[1] != 'T' || blob[2] != 'F' || blob[3] != '2') {
         kprintf("ШРИФТ    : ЭТО НЕ ШРИФТ StellarOS\n");
         return -1;
     }
@@ -52,7 +55,7 @@ int font_init(const u8 *blob, u32 len)
         /* Всё, что обещает заголовок, обязано лежать внутри блоба */
         if (!count || count > 4096 ||
             codes + count * 4 > len ||
-            glyphs + count * 8 > len ||
+            glyphs + count * 16 > len ||
             bits + bits_len > len) {
             kprintf("ШРИФТ    : НАЧЕРТАНИЕ %u ВЫХОДИТ ЗА ГРАНИЦЫ ФАЙЛА\n", px);
             return -1;
@@ -107,14 +110,27 @@ int font_glyph(const struct font_face *f, u32 cp, struct font_glyph *out)
         u32 c = f->codes[mid];
 
         if (c == cp) {
-            const u8 *g = f->glyphs + mid * 8;
-            u32 off = (u32)g[0] | ((u32)g[1] << 8) | ((u32)g[2] << 16);
+            /*
+             * Шестнадцать байт на знак, и все метрики шестнадцатибитные.
+             *
+             * Было восемь, по байту на поле, и на мелких начертаниях это
+             * работало. На кегле 190 подъём цифры над базовой линией
+             * равен -137, а в знаковый байт помещается только -128 — и
+             * он молча становился +119. Цифры уезжали на две с лишним
+             * сотни точек вниз, и снаружи это выглядело так, будто
+             * съехало двоеточие, хотя оно как раз стояло верно. Ошибка,
+             * которую невозможно увидеть по коду: обе стороны были
+             * согласованы между собой и обе ошибались одинаково.
+             */
+            const u8 *g = f->glyphs + mid * 16;
+            u32 off = (u32)g[0] | ((u32)g[1] << 8) |
+                      ((u32)g[2] << 16) | ((u32)g[3] << 24);
 
-            out->w = g[3];
-            out->h = g[4];
-            out->adv = g[5];
-            out->left = (signed char)g[6];
-            out->top = (signed char)g[7];
+            out->w = (u32)g[4] | ((u32)g[5] << 8);
+            out->h = (u32)g[6] | ((u32)g[7] << 8);
+            out->adv = (u32)g[8] | ((u32)g[9] << 8);
+            out->left = (short)((u16)g[10] | ((u16)g[11] << 8));
+            out->top = (short)((u16)g[12] | ((u16)g[13] << 8));
             out->bits = (out->w && out->h) ? f->bits + off : 0;
             return 0;
         }

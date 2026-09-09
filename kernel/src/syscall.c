@@ -18,6 +18,7 @@
 #include "pmic.h"
 #include "ovl.h"
 #include "backlight.h"
+#include "battery.h"
 #include "appload.h"
 #include "sched.h"
 #include "timer.h"
@@ -358,7 +359,10 @@ static void syscall(struct trapframe *f)
             f->x[0] = (u64)-1;
             return;
         }
-        f->x[0] = ((u64)t.hour << 40) | ((u64)t.min << 32) |
+        /* День недели поехал в старшие разряды: младшие сорок восемь
+         * уже заняты, а год у контроллера однобайтовый. */
+        f->x[0] = ((u64)(t.dow & 7) << 48) |
+                  ((u64)t.hour << 40) | ((u64)t.min << 32) |
                   ((u64)t.sec << 24) | ((u64)t.day << 16) |
                   ((u64)t.month << 8) | (u64)t.year;
         return;
@@ -374,18 +378,9 @@ static void syscall(struct trapframe *f)
      * Фронт ловим здесь же: помним, была ли кнопка нажата в прошлый
      * раз, и о событии сообщаем только на переходе.
      */
-    case SYS_PWRKEY: {
-        static int was, pending;
-        int now = pmic_powerkey();
-
-        if (now && !was)
-            pending = 1;
-        was = now;
-
-        f->x[0] = (u64)pending;
-        pending = 0;
+    case SYS_PWRKEY:
+        f->x[0] = (u64)pmic_powerkey_taken();
         return;
-    }
 
     /*
      * Погасить или вернуть экран.
@@ -409,6 +404,48 @@ static void syscall(struct trapframe *f)
         if (f->x[0] != 255)
             backlight_level((u32)f->x[0]);
         f->x[0] = (u64)(s64)backlight_percent();
+        return;
+
+    /*
+     * Батарея одним числом.
+     *
+     * Упаковано по той же причине, что и время: системный вызов отдаёт
+     * один регистр, а складывать структуру в память программы значило бы
+     * заводить проверку чужого адреса ради восьми байт.
+     *
+     * Берём ПОСЛЕДНИЙ замер, а не делаем новый. Замер занимает полторы
+     * миллисекунды — столько усредняет АЦП, — и если бы его делал всякий
+     * рисующий, оболочка платила бы эти полторы миллисекунды за кадр.
+     * Батарея за шестнадцать миллисекунд не меняется.
+     */
+    case SYS_BATT: {
+        struct battery_state st;
+
+        battery_last(&st);
+        f->x[0] = (u64)(st.percent > 100 ? 100 : st.percent)
+                | ((u64)(st.charging ? 1 : 0) << 8)
+                | ((u64)(st.valid ? 1 : 0) << 9)
+                | ((u64)(st.mv & 0xFFFF) << 16)
+                | ((u64)((u16)(s16)st.current_ma) << 32);
+        return;
+    }
+
+    /*
+     * Обои в своё окно.
+     *
+     * Прямоугольником, а не всегда целиком: при движении пальцем
+     * обновлять надо только освободившуюся полосу, а не весь экран.
+     */
+    case SYS_WALL:
+        f->x[0] = (u64)(s64)window_wallpaper((u32)f->x[0], (u32)f->x[1],
+                                             (u32)f->x[2], (u32)f->x[3],
+                                             (u32)f->x[4]);
+        return;
+
+    case SYS_STRIP:
+        ui_strip_wallpaper(f->x[0] ? 1 : 0);
+        ui_strip_lift((u32)f->x[1]);
+        f->x[0] = 0;
         return;
 
     case SYS_TEXTW:

@@ -53,7 +53,10 @@
                                 /* 1 - da, i priznak snimaetsya           */
 #define SYS_BLANK       22      /* x0: 1 pogasit ekran, 0 vernut          */
 #define SYS_BRIGHT      23      /* x0: yarkost 0..100%, 255 = tolko sprosit */
-#define SYS_COUNT       24
+#define SYS_BATT        24      /* zaryad batarei odnim chislom, sm. nizhe */
+#define SYS_WALL        25      /* x0 polovina, x1..x4 pryamougolnik      */
+#define SYS_STRIP       26      /* x0: 1 oboi v sistemnyh polosah, 0 net  */
+#define SYS_COUNT       27
 
 /*
  * Событие касания в том виде, в каком его получает EL0.

@@ -26,6 +26,10 @@
 #include <string.h>
 #include <math.h>
 
+/* Байт на знак в файле шрифта. Шестнадцать, а не восемь: на кегле 190
+ * подъём цифры равен -137, и в знаковый байт он не помещается. */
+#define GLYPH_REC   16
+
 typedef unsigned char  u8;
 typedef unsigned short u16;
 typedef unsigned int   u32;
@@ -574,11 +578,20 @@ static void add_range(u32 a, u32 b)
         charset[ncs++] = c;
 }
 
+/*
+ * Метрики знака держим широкими ВНУТРИ тоже, а не только в файле.
+ *
+ * Сначала я расширил поля в файле и решил, что дело сделано, — а числа
+ * остались прежними: переполнение случалось здесь, при укладке в эту
+ * структуру, задолго до записи. Байтовых полей хватало, пока начертания
+ * были мелкими; на кегле 190 подъём цифры равен -137 и в знаковый байт
+ * не помещается.
+ */
 struct glyph_out {
     u32 code;
     u32 off;
-    u8  w, h, adv;
-    signed char left, top;
+    u16 w, h, adv;
+    s16 left, top;
     u8 *bits;
 };
 
@@ -587,8 +600,10 @@ static struct glyph_out gl[MAX_CHARS];
 int main(int argc, char **argv)
 {
     FILE *f, *out;
-    int sizes[8], nsizes = 0;
-    const char *face_chars[8];
+    /* Десять, а не восемь: под макет понадобились ещё два кегля —
+     * крупные часы и дата на экране блокировки. */
+    int sizes[10], nsizes = 0;
+    const char *face_chars[10];
     long head, hhea, hmtx;
     u16 units, nhm;
     double asc, desc;
@@ -629,7 +644,10 @@ int main(int argc, char **argv)
     {
         const char *p = argv[2];
 
-        while (*p && nsizes < 8) {
+        /* Предел тот же, что у массивов выше. Раньше здесь стояла
+         * восьмёрка отдельным числом — и девятый кегль молча не
+         * попадал в шрифт, а сборка при этом отчитывалась успехом. */
+        while (*p && nsizes < (int)(sizeof(sizes) / sizeof(sizes[0]))) {
             sizes[nsizes] = atoi(p);
             face_chars[nsizes] = NULL;
             while (*p && *p != ',' && *p != ':')
@@ -691,7 +709,7 @@ int main(int argc, char **argv)
     {
         u32 zero = 0;
 
-        fwrite("STF1", 1, 4, out);
+        fwrite("STF2", 1, 4, out);
         fwrite(&zero, 4, 1, out);
         for (int i = 0; i < 8 * 8; i++)
             fwrite(&zero, 4, 1, out);
@@ -751,8 +769,17 @@ int main(int argc, char **argv)
             gl[used].code = set[i];
             gl[used].w = (u8)gw;
             gl[used].h = (u8)gh;
-            gl[used].left = (signed char)gx;
-            gl[used].top = (signed char)gy;
+            /*
+             * Приведения к signed char здесь и стояли — вот та самая
+             * потеря. Правка формата и структуры без этой строки ничего
+             * не давала: число обрезалось раньше, чем куда-либо попадало.
+             *
+             * Урок общий: расширяя поле, надо пройти ВЕСЬ путь значения,
+             * а не только его конец. Я чинил этот путь трижды с конца и
+             * трижды получал те же 119.
+             */
+            gl[used].left = (s16)gx;
+            gl[used].top = (s16)gy;
             gl[used].adv = (u8)(adv * px_scale + 0.5);
             gl[used].bits = bits;
             gl[used].off = total;
@@ -766,7 +793,7 @@ int main(int argc, char **argv)
         faces[nface][3] = (u32)used;
         faces[nface][4] = blob_off;                         /* коды    */
         faces[nface][5] = blob_off + (u32)used * 4;         /* глифы   */
-        faces[nface][6] = faces[nface][5] + (u32)used * 8;  /* пиксели */
+        faces[nface][6] = faces[nface][5] + (u32)used * GLYPH_REC;  /* пиксели */
         faces[nface][7] = total;
 
         for (int i = 0; i < used; i++) {
@@ -775,17 +802,41 @@ int main(int argc, char **argv)
             fwrite(&c, 4, 1, out);
         }
         for (int i = 0; i < used; i++) {
-            u8 rec[8];
+            /*
+             * Двенадцать байт на знак, а не восемь.
+             *
+             * Восьми хватало, пока начертания были мелкими: ширина,
+             * высота, сдвиг и подъём над базовой линией укладывались в
+             * байт каждый. На кегле 190 подъём цифры равен -137, а в
+             * знаковый байт помещается только -128 — и он молча
+             * превращался в +119. Цифры от этого уезжали на две с
+             * лишним сотни точек вниз, и выглядело это так, будто
+             * съехало двоеточие, хотя оно как раз стояло верно.
+             *
+             * Поэтому все метрики теперь шестнадцатибитные. Подпись
+             * файла сменена на STF2: старый шрифт с новым ядром не
+             * должен молча прочитаться как попало.
+             */
+            u8 rec[GLYPH_REC];
+            int lf = gl[i].left, tp = gl[i].top;
 
             rec[0] = (u8)(gl[i].off & 0xFF);
             rec[1] = (u8)((gl[i].off >> 8) & 0xFF);
             rec[2] = (u8)((gl[i].off >> 16) & 0xFF);
-            rec[3] = gl[i].w;
-            rec[4] = gl[i].h;
-            rec[5] = gl[i].adv;
-            rec[6] = (u8)gl[i].left;
-            rec[7] = (u8)gl[i].top;
-            fwrite(rec, 1, 8, out);
+            rec[3] = (u8)((gl[i].off >> 24) & 0xFF);
+            rec[4] = (u8)(gl[i].w & 0xFF);
+            rec[5] = (u8)((gl[i].w >> 8) & 0xFF);
+            rec[6] = (u8)(gl[i].h & 0xFF);
+            rec[7] = (u8)((gl[i].h >> 8) & 0xFF);
+            rec[8] = (u8)(gl[i].adv & 0xFF);
+            rec[9] = (u8)((gl[i].adv >> 8) & 0xFF);
+            rec[10] = (u8)(lf & 0xFF);
+            rec[11] = (u8)((lf >> 8) & 0xFF);
+            rec[12] = (u8)(tp & 0xFF);
+            rec[13] = (u8)((tp >> 8) & 0xFF);
+            rec[14] = 0;
+            rec[15] = 0;
+            fwrite(rec, 1, GLYPH_REC, out);
         }
         for (int i = 0; i < used; i++) {
             if (gl[i].bits) {
